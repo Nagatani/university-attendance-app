@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- USB CCID (Chip/Smart Card Interface Devices: Class 0x0B = 11) 全般 -->
+    <usb-device class="11" />
+
+    <!-- 主要な外付けNFCリーダーメーカー（Vendor Specific インターフェースを持つ機種も網羅） -->
+    <!-- ACS (Advanced Card Systems: ACR122U, ACR1252U, ACR1281U 等) VID = 0x072F (1839) -->
+    <usb-device vendor-id="1839" />
+    <!-- Sony (PaSoRi RC-S300, RC-S380 等) VID = 0x054C (1356) -->
+    <usb-device vendor-id="1356" />
+    <!-- Identiv / SCM Microsystems (uTrust 3700F 等) VID = 0x04E6 (1254) -->
+    <usb-device vendor-id="1254" />
+    <!-- HID Global (OMNIKEY 5022, 5427 等) VID = 0x076B (1899) -->
+    <usb-device vendor-id="1899" />
+    <!-- NXP Semiconductors VID = 0x1FC9 (8137) -->
+    <usb-device vendor-id="8137" />
+    <!-- Feitian Technologies VID = 0x096E (2414) -->
+    <usb-device vendor-id="2414" />
+    <!-- Thales / Gemalto VID = 0x08E6 (2278) -->
+    <usb-device vendor-id="2278" />
+</resources>

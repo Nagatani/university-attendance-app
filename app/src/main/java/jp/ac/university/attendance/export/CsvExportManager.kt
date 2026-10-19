@@ -1,11 +1,16 @@
 package jp.ac.university.attendance.export
 
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import jp.ac.university.attendance.data.local.AttendanceExportRow
+import jp.ac.university.attendance.data.preferences.ExportConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -111,7 +116,10 @@ object CsvExportManager {
     }
 
     /**
-     * 方法2: 事前設定された「所定の保存先フォルダ（Tree URI）」へワンタップでCSVファイルを自動作成・保存する
+     * 方法2: 事前設定された「所定の保存先フォルダ」へワンタップでCSVファイルを自動作成・保存する
+     * - "DOWNLOADS" (または未指定): Android標準の Download/UniversityAttendance/ へ直接出力
+     *   （Android Goエディションのように ACTION_OPEN_DOCUMENT_TREE が制限されている端末でも100%動作）
+     * - "content://..." : SAFで選択された任意のフォルダへ出力
      */
     suspend fun exportToDesignatedDirectory(
         context: Context,
@@ -121,15 +129,20 @@ object CsvExportManager {
         includeUtf8Bom: Boolean = true
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
-            if (directoryTreeUriString.isBlank()) {
-                throw IllegalArgumentException("所定の保存先フォルダが未設定です。エクスポート画面または設定からフォルダを選択してください。")
+            val csvText = buildCsvContent(rows, includeUtf8Bom)
+
+            if (directoryTreeUriString.isBlank() ||
+                directoryTreeUriString == ExportConfig.DEFAULT_DOWNLOADS_TARGET
+            ) {
+                return@runCatching writeToSystemDownloads(context, fileName, csvText, rows.size)
             }
+
             val treeUri = Uri.parse(directoryTreeUriString)
             val pickedDir = DocumentFile.fromTreeUri(context, treeUri)
-                ?: throw IllegalStateException("指定されたフォルダにアクセスできません。")
+                ?: return@runCatching writeToSystemDownloads(context, fileName, csvText, rows.size)
 
             if (!pickedDir.canWrite()) {
-                throw IllegalStateException("所定のフォルダへの書き込み権限がありません。再度フォルダを選択してください。")
+                return@runCatching writeToSystemDownloads(context, fileName, csvText, rows.size)
             }
 
             // 同名ファイルが既にあれば削除して作り直す
@@ -138,7 +151,6 @@ object CsvExportManager {
             val newFile = pickedDir.createFile("text/csv", fileName)
                 ?: throw IllegalStateException("所定のフォルダ内にCSVファイル ($fileName) を作成できませんでした。")
 
-            val csvText = buildCsvContent(rows, includeUtf8Bom)
             val outputStream = context.contentResolver.openOutputStream(newFile.uri, "wt")
                 ?: throw IllegalStateException("ファイルストリームを開けませんでした。")
 
@@ -152,6 +164,47 @@ object CsvExportManager {
             val dirName = pickedDir.name ?: "指定フォルダ"
             "$dirName / ${newFile.name ?: fileName} (${rows.size}件)"
         }
+    }
+
+    /**
+     * Android 10+ (API 29+) では MediaStore.Downloads、Android 8〜9 ではアプリ外部領域へ直接書き込む
+     * （SAFのフォルダ選択UIが省略されている Android Go エディション端末でも確実に保存可能）
+     */
+    private fun writeToSystemDownloads(
+        context: Context,
+        fileName: String,
+        csvText: String,
+        rowCount: Int
+    ): String {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val resolver = context.contentResolver
+            val contentValues = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                put(MediaStore.Downloads.MIME_TYPE, "text/csv")
+                put(
+                    MediaStore.Downloads.RELATIVE_PATH,
+                    Environment.DIRECTORY_DOWNLOADS + "/UniversityAttendance"
+                )
+            }
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+            if (uri != null) {
+                resolver.openOutputStream(uri, "wt")?.use { stream ->
+                    OutputStreamWriter(stream, StandardCharsets.UTF_8).use { writer ->
+                        writer.write(csvText)
+                        writer.flush()
+                    }
+                }
+                return "Download/UniversityAttendance/$fileName (${rowCount}件)"
+            }
+        }
+
+        // フォールバック: アプリ固有外部ストレージ (/Android/data/.../files/exports/)
+        val fallbackDir = File(context.getExternalFilesDir(null), "exports").apply {
+            if (!exists()) mkdirs()
+        }
+        val outFile = File(fallbackDir, fileName)
+        outFile.writeText(csvText, StandardCharsets.UTF_8)
+        return "${outFile.absolutePath} (${rowCount}件)"
     }
 
     /**

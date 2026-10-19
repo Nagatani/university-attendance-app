@@ -126,15 +126,35 @@ class MainActivity : ComponentActivity(), NfcAdapter.ReaderCallback {
                     isNfcEnabled = isNfcEnabledState,
                     onPickDefaultFolder = {
                         pendingScopeAfterFolderPick = null
-                        pickDefaultDirectoryLauncher.launch(null)
+                        runCatching {
+                            pickDefaultDirectoryLauncher.launch(null)
+                        }.onFailure {
+                            viewModel.postMessage(
+                                "この端末(Android Go等)ではフォルダ選択UIが省略されているため、標準のDownloadフォルダを所定の場所として使用します"
+                            )
+                        }
                     },
                     onRequestDefaultFolderThenExport = { scope ->
                         pendingScopeAfterFolderPick = scope
-                        viewModel.postMessage("初回設定: エクスポート先の「所定のフォルダ」を選択してください")
-                        pickDefaultDirectoryLauncher.launch(null)
+                        runCatching {
+                            pickDefaultDirectoryLauncher.launch(null)
+                        }.onFailure {
+                            pendingScopeAfterFolderPick = null
+                            viewModel.exportToDesignatedFolder(
+                                context = this@MainActivity,
+                                scope = scope,
+                                onNeedDirectorySelection = {}
+                            )
+                        }
                     },
                     onLaunchCreateDocument = { suggestedFileName ->
-                        createCsvDocumentLauncher.launch(suggestedFileName)
+                        runCatching {
+                            createCsvDocumentLauncher.launch(suggestedFileName)
+                        }.onFailure {
+                            viewModel.postMessage(
+                                "ファイル選択ダイアログを開けない端末のため、「所定の場所へ出力」または「共有」をご利用ください"
+                            )
+                        }
                     }
                 )
             }

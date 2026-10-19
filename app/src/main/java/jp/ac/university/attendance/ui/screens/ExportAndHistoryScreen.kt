@@ -94,9 +94,12 @@ fun ExportAndHistoryScreen(
         ExportScope.AllRecords
     }
 
+    val isDefaultDownloads = exportConfig.defaultDirectoryUri.isBlank() ||
+        exportConfig.defaultDirectoryUri == ExportConfig.DEFAULT_DOWNLOADS_TARGET
+
     val readableFolderUri = remember(exportConfig.defaultDirectoryUri) {
-        if (exportConfig.defaultDirectoryUri.isBlank()) {
-            "未設定（「所定のフォルダを選択」から保存先フォルダを指定すると、以後ワンタップでそこへCSV出力されます）"
+        if (isDefaultDownloads) {
+            "端末の Download/UniversityAttendance/ フォルダ（標準設定・Android Goエディション対応）"
         } else {
             runCatching { Uri.decode(exportConfig.defaultDirectoryUri) }
                 .getOrDefault(exportConfig.defaultDirectoryUri)
@@ -138,11 +141,7 @@ fun ExportAndHistoryScreen(
                         Text(
                             text = "所定の保存先フォルダ: $readableFolderUri",
                             style = MaterialTheme.typography.bodySmall,
-                            color = if (exportConfig.defaultDirectoryUri.isBlank()) {
-                                MaterialTheme.colorScheme.tertiary
-                            } else {
-                                MaterialTheme.colorScheme.secondary
-                            },
+                            color = MaterialTheme.colorScheme.secondary,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -150,10 +149,25 @@ fun ExportAndHistoryScreen(
 
                     Spacer(modifier = Modifier.width(12.dp))
 
-                    OutlinedButton(onClick = onPickDefaultDirectory) {
-                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(if (exportConfig.defaultDirectoryUri.isBlank()) "所定のフォルダを選択" else "所定のフォルダを変更")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (!isDefaultDownloads) {
+                            OutlinedButton(
+                                onClick = {
+                                    onUpdateExportConfig(
+                                        exportConfig.copy(
+                                            defaultDirectoryUri = ExportConfig.DEFAULT_DOWNLOADS_TARGET
+                                        )
+                                    )
+                                }
+                            ) {
+                                Text("標準Downloadフォルダに戻す")
+                            }
+                        }
+                        OutlinedButton(onClick = onPickDefaultDirectory) {
+                            Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("別のフォルダを選択 (SAF)")
+                        }
                     }
                 }
 

@@ -77,13 +77,21 @@ data class MifareConfig(
  * CSVエクスポート・音声フィードバック設定
  */
 data class ExportConfig(
-    /** 所定のエクスポート先フォルダURI（SAF OpenDocumentTree で選択された永続化URI） */
-    val defaultDirectoryUri: String = "",
+    /**
+     * 所定のエクスポート先フォルダURI
+     * - "DOWNLOADS" (デフォルト): 端末の Download/UniversityAttendance/ フォルダへ直接保存（Android Goエディションでも権限・SAF不要で確実に動作）
+     * - "content://..." : SAF OpenDocumentTree で選択された任意のフォルダURI
+     */
+    val defaultDirectoryUri: String = DEFAULT_DOWNLOADS_TARGET,
     /** Excelで文字化けしないようUTF-8 BOM (\uFEFF) を付与するか */
     val includeUtf8Bom: Boolean = true,
     /** カード読み取り時に効果音（ピピッ等）を鳴らすか */
     val soundEnabled: Boolean = true
-)
+) {
+    companion object {
+        const val DEFAULT_DOWNLOADS_TARGET = "DOWNLOADS"
+    }
+}
 
 /**
  * MIFARE Classic鍵情報およびエクスポート設定を永続化するリポジトリ
@@ -121,8 +129,11 @@ class MifareSettingsRepository(context: Context) {
     }
 
     private fun loadExportConfig(): ExportConfig {
+        val savedUri = prefs.getString(KEY_DEFAULT_DIR_URI, ExportConfig.DEFAULT_DOWNLOADS_TARGET)
+            ?.takeIf { it.isNotBlank() }
+            ?: ExportConfig.DEFAULT_DOWNLOADS_TARGET
         return ExportConfig(
-            defaultDirectoryUri = prefs.getString(KEY_DEFAULT_DIR_URI, "") ?: "",
+            defaultDirectoryUri = savedUri,
             includeUtf8Bom = prefs.getBoolean(KEY_INCLUDE_BOM, true),
             soundEnabled = prefs.getBoolean(KEY_SOUND_ENABLED, true)
         )

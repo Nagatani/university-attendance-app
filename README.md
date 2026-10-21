@@ -48,7 +48,7 @@ university-attendance-app/
 │   └── src/
 │       ├── main/
 │       │   ├── AndroidManifest.xml
-│       │   ├── java/app/nagatani/dev/attendance/
+│       │   ├── java/jp/ac/university/attendance/
 │       │   │   ├── MainActivity.kt                        # NFC ReaderMode・USB接続監視・SAFランチャー・ナビゲーション
 │       │   │   ├── data/
 │       │   │   │   ├── local/
@@ -56,7 +56,7 @@ university-attendance-app/
 │       │   │   │   │   ├── AttendanceDao.kt               # DBクエリ・集計・CSV結合取得DAO
 │       │   │   │   │   └── AppDatabase.kt                 # Roomデータベース定義＆初期サンプルデータ投入
 │       │   │   │   └── preferences/
-│       │   │   │       └── MifareSettingsRepository.kt    # MIFARE鍵（一括テキスト対応）・セクター設定＆保存先フォルダ設定の永続化
+│       │   │   │       └── MifareSettingsRepository.kt    # MIFARE鍵・セクター設定＆保存先フォルダ設定の永続化
 │       │   │   ├── nfc/
 │       │   │   │   └── MifareClassicReader.kt             # 本体NFC用MIFARE Classic鍵認証・16バイト読取・学籍番号デコーダ
 │       │   │   ├── usb/
@@ -72,14 +72,14 @@ university-attendance-app/
 │       │   │           ├── CourseManagementScreen.kt      # 講義・講義回管理（タブレット2ペイン画面）
 │       │   │           ├── AttendanceKioskScreen.kt       # 出席受付モード（全画面キオスク画面）
 │       │   │           ├── ExportAndHistoryScreen.kt      # 所定フォルダ設定・CSV出力・全履歴検索画面
-│       │   │           └── MifareSettingsScreen.kt        # MIFARE鍵設定（一括テキスト指定）・USBリーダー管理＆16バイト診断画面
+│       │   │           └── MifareSettingsScreen.kt        # MIFARE鍵設定・USBリーダー管理＆16バイトリアルタイム診断画面
 │       │   └── res/
 │       │       └── xml/
 │       │           ├── nfc_tech_filter.xml                # 本体NFC用フィルタ
 │       │           ├── usb_device_filter.xml              # 外付けUSB CCID NFCリーダー自動認識フィルタ
 │       │           └── file_paths.xml                     # CSV共有用FileProviderパス
 │       └── test/
-│           └── java/app/nagatani/dev/attendance/
+│           └── java/jp/ac/university/attendance/
 │               └── MifareAndCsvTest.kt                    # MIFAREデコード・USB CCID APDU・CSV出力の単体テスト
 ├── build.gradle.kts
 ├── settings.gradle.kts

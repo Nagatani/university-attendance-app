@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Nfc
@@ -55,6 +56,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -83,12 +86,19 @@ fun MifareSettingsScreen(
     onSaveConfig: (MifareConfig) -> Unit,
     onSimulateDiagnosticCard: (sampleStudentId: String) -> Unit
 ) {
+    val clipboardManager = LocalClipboardManager.current
+
     // 編集用ステート（保存済み設定で初期化）
     var sectorText by remember(currentConfig) { mutableStateOf(currentConfig.sectorIndex.toString()) }
     var blockText by remember(currentConfig) { mutableStateOf(currentConfig.blockIndexInSector.toString()) }
     var keyType by remember(currentConfig) { mutableStateOf(currentConfig.keyType) }
-    var keyHex by remember(currentConfig) { mutableStateOf(currentConfig.keyHex) }
-    var showKeyPlain by remember { mutableStateOf(false) }
+    var bulkKeysText by remember(currentConfig) {
+        mutableStateOf(currentConfig.bulkKeysText.ifBlank { currentConfig.keyHex })
+    }
+    var tryBothKeyTypes by remember(currentConfig) {
+        mutableStateOf(currentConfig.tryBothKeyTypesForPlainHex)
+    }
+    var showKeyPlain by remember { mutableStateOf(true) }
 
     var encoding by remember(currentConfig) { mutableStateOf(currentConfig.encoding) }
     var offsetText by remember(currentConfig) { mutableStateOf(currentConfig.byteOffset.toString()) }
@@ -100,16 +110,17 @@ fun MifareSettingsScreen(
 
     // 現在フォームに入力されているドラフト設定を生成
     val draftConfig = remember(
-        sectorText, blockText, keyType, keyHex, encoding,
+        sectorText, blockText, keyType, bulkKeysText, tryBothKeyTypes, encoding,
         offsetText, lengthText, trimPadding, regexText, allowUidFallback, kioskPin
     ) {
         val safeOffset = (offsetText.toIntOrNull() ?: 0).coerceIn(0, 15)
         val safeLength = (lengthText.toIntOrNull() ?: 10).coerceIn(1, 16 - safeOffset)
-        MifareConfig(
+        val temp = MifareConfig(
             sectorIndex = (sectorText.toIntOrNull() ?: 1).coerceIn(0, 39),
             blockIndexInSector = (blockText.toIntOrNull() ?: 0).coerceIn(0, 14),
             keyType = keyType,
-            keyHex = keyHex.trim().uppercase(),
+            bulkKeysText = bulkKeysText,
+            tryBothKeyTypesForPlainHex = tryBothKeyTypes,
             encoding = encoding,
             byteOffset = safeOffset,
             byteLength = safeLength,
@@ -118,9 +129,17 @@ fun MifareSettingsScreen(
             allowUidFallback = allowUidFallback,
             kioskPin = kioskPin.trim()
         )
+        val primary = temp.resolveKeyCandidatesForSector(temp.sectorIndex).firstOrNull()
+        temp.copy(
+            keyHex = primary?.keyHex ?: "FFFFFFFFFFFF"
+        )
     }
 
-    val isKeyValid = draftConfig.parseKeyBytes() != null
+    val parseSummary = remember(draftConfig) { draftConfig.parseBulkKeys() }
+    val activeCandidatesForSector = remember(draftConfig) {
+        draftConfig.resolveKeyCandidatesForSector(draftConfig.sectorIndex)
+    }
+    val isKeyValid = activeCandidatesForSector.isNotEmpty() && parseSummary.errors.isEmpty()
 
     Row(
         modifier = Modifier
@@ -176,9 +195,9 @@ fun MifareSettingsScreen(
 
                 HorizontalDivider()
 
-                // 1. セクター・ブロック・認証鍵設定
+                // 1. セクター・ブロック・認証鍵の一括テキスト設定
                 Text(
-                    text = "1. セクター認証・対象ブロック指定",
+                    text = "1. 読み取り対象セクター・ブロック ＆ 鍵データ一括テキスト指定",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary
@@ -191,7 +210,7 @@ fun MifareSettingsScreen(
                     OutlinedTextField(
                         value = sectorText,
                         onValueChange = { sectorText = it.filter { ch -> ch.isDigit() } },
-                        label = { Text("セクター番号 (1K: 0〜15)") },
+                        label = { Text("読み取りセクター番号 (1K: 0〜15)") },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
@@ -204,75 +223,177 @@ fun MifareSettingsScreen(
                     )
                 }
 
-                // Key A / Key B 選択
+                // 一括テキスト指定のツールバー（クリップボード貼り付け・プリセット追加・表示切替）
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "セクター認証鍵リスト（複数行・一括テキスト指定）:",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                val clip = clipboardManager.getText()?.text
+                                if (!clip.isNullOrBlank()) {
+                                    bulkKeysText = clip
+                                }
+                            }
+                        ) {
+                            Icon(Icons.Default.ContentPaste, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("貼り付け")
+                        }
+
+                        IconButton(onClick = { showKeyPlain = !showKeyPlain }) {
+                            Icon(
+                                imageVector = if (showKeyPlain) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                contentDescription = "鍵テキストの表示切替"
+                            )
+                        }
+                    }
+                }
+
+                // 複数行の鍵データ一括入力フィールド
+                OutlinedTextField(
+                    value = bulkKeysText,
+                    onValueChange = { bulkKeysText = it },
+                    label = {
+                        Text("1行に1件ずつ指定（12桁HEX / セクター:AまたはB:12桁HEX / セクター:KeyA:KeyB）")
+                    },
+                    textStyle = TextStyle(
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 15.sp
+                    ),
+                    isError = !isKeyValid,
+                    visualTransformation = if (showKeyPlain) VisualTransformation.None else PasswordVisualTransformation(),
+                    minLines = 5,
+                    maxLines = 10,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // 代表的な鍵リストや書式サンプルをワンタップで挿入するチップ群
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    AssistChip(
+                        onClick = {
+                            bulkKeysText =
+                                "# 標準プリセット鍵一括指定 (MIFARE Classic Tool互換)\n" +
+                                "FFFFFFFFFFFF\n" +
+                                "A0A1A2A3A4A5\n" +
+                                "D3F7D3F7D3F7"
+                        },
+                        label = { Text("標準3鍵を一括セット") }
+                    )
+                    AssistChip(
+                        onClick = {
+                            val sec = draftConfig.sectorIndex
+                            bulkKeysText =
+                                "# セクター番号・Key A/B 明示指定サンプル\n" +
+                                "$sec:A:FFFFFFFFFFFF\n" +
+                                "$sec:B:FFFFFFFFFFFF\n" +
+                                "$sec:A0A1A2A3A4A5:B0B1B2B3B4B5"
+                        },
+                        label = { Text("セクター:A/B:鍵 書式例") }
+                    )
+                    AssistChip(
+                        onClick = { bulkKeysText = "FFFFFFFFFFFF" },
+                        label = { Text("初期値 (FFFF...) のみ") }
+                    )
+                }
+
+                // 12桁HEX単体記述時の挙動設定
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text("認証鍵種別:", fontWeight = FontWeight.SemiBold)
+                    Text("優先鍵種別:", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
                     MifareKeyType.entries.forEach { type ->
                         FilterChip(
                             selected = keyType == type,
                             onClick = { keyType = type },
-                            label = { Text(type.displayName) }
+                            label = { Text("${type.displayName} 優先") }
                         )
                     }
                 }
 
-                // 12桁HEXキー入力
-                OutlinedTextField(
-                    value = keyHex,
-                    onValueChange = { input ->
-                        val filtered = input.uppercase().filter { it in '0'..'9' || it in 'A'..'F' }.take(12)
-                        keyHex = filtered
-                    },
-                    label = { Text("MIFARE Classic 6バイト鍵 (16進数12文字, 例: FFFFFFFFFFFF)") },
-                    isError = !isKeyValid,
-                    visualTransformation = if (showKeyPlain) VisualTransformation.None else PasswordVisualTransformation(),
-                    trailingIcon = {
-                        IconButton(onClick = { showKeyPlain = !showKeyPlain }) {
-                            Icon(
-                                imageVector = if (showKeyPlain) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                contentDescription = "鍵の表示切替"
-                            )
-                        }
-                    },
-                    supportingText = {
-                        if (!isKeyValid) {
-                            Text(
-                                text = "16進数（0-9, A-F）でちょうど12文字（6バイト）入力してください（現在 ${keyHex.length} 文字）",
-                                color = MaterialTheme.colorScheme.error
-                            )
-                        } else {
-                            Text("有効な6バイト鍵 (${keyHex.length}/12文字)")
-                        }
-                    },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                // 代表的な標準キーのワンタップ入力チップ
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    modifier = Modifier.clickable { tryBothKeyTypes = !tryBothKeyTypes }
                 ) {
+                    Checkbox(
+                        checked = tryBothKeyTypes,
+                        onCheckedChange = { tryBothKeyTypes = it }
+                    )
                     Text(
-                        text = "標準鍵プリセット:",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        text = "鍵種別(A/B)を省略した12桁HEX行は Key A と Key B の両方を順に自動試行する",
+                        style = MaterialTheme.typography.bodyMedium
                     )
-                    AssistChip(
-                        onClick = { keyHex = "FFFFFFFFFFFF" },
-                        label = { Text("Factory (FFFF...)") }
-                    )
-                    AssistChip(
-                        onClick = { keyHex = "A0A1A2A3A4A5" },
-                        label = { Text("MAD (A0A1...)") }
-                    )
-                    AssistChip(
-                        onClick = { keyHex = "D3F7D3F7D3F7" },
-                        label = { Text("NDEF (D3F7...)") }
-                    )
+                }
+
+                // リアルタイム鍵パース診断ボックス
+                Surface(
+                    color = if (isKeyValid) {
+                        MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f)
+                    } else {
+                        MaterialTheme.colorScheme.errorContainer
+                    },
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        if (parseSummary.errors.isNotEmpty()) {
+                            Text(
+                                text = "鍵テキストの書式エラー (${parseSummary.errors.size}件):",
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            parseSummary.errors.take(4).forEach { err ->
+                                Text(
+                                    text = "・$err",
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        } else if (activeCandidatesForSector.isEmpty()) {
+                            Text(
+                                text = "セクター ${draftConfig.sectorIndex} に適用可能な鍵が0件です。有効な12桁HEXキーを入力してください。",
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        } else {
+                            Text(
+                                text = "有効な鍵行: ${parseSummary.validLineCount}行  →  セクター ${draftConfig.sectorIndex} への認証試行候補: ${activeCandidatesForSector.size}通り",
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            val previewList = activeCandidatesForSector.take(6).mapIndexed { idx, c ->
+                                "${idx + 1}. ${c.keyType.displayName}:${if (showKeyPlain) c.keyHex else "••••••••••••"}"
+                            }.joinToString("  /  ")
+                            Text(
+                                text = "試行順: $previewList" +
+                                    if (activeCandidatesForSector.size > 6) " ...他${activeCandidatesForSector.size - 6}件" else "",
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                        }
+                    }
                 }
 
                 HorizontalDivider()

@@ -3,6 +3,7 @@ package jp.ac.university.attendance.nfc
 import android.nfc.Tag
 import android.nfc.tech.MifareClassic
 import jp.ac.university.attendance.data.preferences.MifareConfig
+import jp.ac.university.attendance.data.preferences.MifareKeyCandidate
 import jp.ac.university.attendance.data.preferences.MifareKeyType
 import jp.ac.university.attendance.data.preferences.StudentIdEncoding
 import java.io.IOException
@@ -79,14 +80,16 @@ object MifareClassicReader {
         val cardUid = bytesToHex(tag.id, separator = "")
         val techList = tag.techList?.map { it.substringAfterLast('.') } ?: emptyList()
 
-        // 1. 鍵のフォーマット検証
-        val keyBytes = config.parseKeyBytes()
-            ?: return MifareReadResult.Error(
+        // 1. 一括鍵設定テキストから当該セクター向けの鍵候補リストを取得
+        val keyCandidates = config.resolveKeyCandidatesForSector(config.sectorIndex)
+        if (keyCandidates.isEmpty()) {
+            return MifareReadResult.Error(
                 cardUid = cardUid,
                 title = "MIFARE鍵設定エラー",
-                message = "鍵情報が12桁の16進数（6バイト）ではありません。設定画面を確認してください。",
+                message = "有効な12桁の16進数キー（6バイト）が1件も指定されていません。設定画面の鍵テキストを確認してください。",
                 techList = techList
             )
+        }
 
         // 2. MifareClassic インスタンス取得
         val mifare = MifareClassic.get(tag)
@@ -135,18 +138,33 @@ object MifareClassicReader {
                 )
             }
 
-            // 3. セクター認証（Key A または Key B）
-            val authenticated = when (config.keyType) {
-                MifareKeyType.KEY_A -> mifare.authenticateSectorWithKeyA(config.sectorIndex, keyBytes)
-                MifareKeyType.KEY_B -> mifare.authenticateSectorWithKeyB(config.sectorIndex, keyBytes)
+            // 3. 候補キーを順番に試行してセクター認証（Key A または Key B）
+            var matchedCandidate: MifareKeyCandidate? = null
+            for ((index, candidate) in keyCandidates.withIndex()) {
+                if (index > 0) {
+                    // MIFARE Classic仕様上、認証失敗後は一度HALT状態になるため再接続してから次の鍵を試行
+                    runCatching {
+                        mifare.close()
+                        mifare.connect()
+                    }
+                }
+                val keyBytes = candidate.toKeyBytes()
+                val ok = when (candidate.keyType) {
+                    MifareKeyType.KEY_A -> mifare.authenticateSectorWithKeyA(config.sectorIndex, keyBytes)
+                    MifareKeyType.KEY_B -> mifare.authenticateSectorWithKeyB(config.sectorIndex, keyBytes)
+                }
+                if (ok) {
+                    matchedCandidate = candidate
+                    break
+                }
             }
 
-            if (!authenticated) {
+            if (matchedCandidate == null) {
                 return MifareReadResult.AuthFailed(
                     cardUid = cardUid,
                     sectorIndex = config.sectorIndex,
-                    keyType = config.keyType,
-                    message = "セクター ${config.sectorIndex} の ${config.keyType.displayName} 認証に失敗しました。鍵情報またはセクター番号を確認してください。"
+                    keyType = keyCandidates.first().keyType,
+                    message = "セクター ${config.sectorIndex} に対して指定された計 ${keyCandidates.size} 通りの鍵候補すべてで認証に失敗しました。"
                 )
             }
 
@@ -155,10 +173,10 @@ object MifareClassicReader {
             val rawBlock = mifare.readBlock(absoluteBlockIndex)
 
             val cardTypeDesc = when (mifare.type) {
-                MifareClassic.TYPE_CLASSIC -> "MIFARE Classic (${mifare.size} bytes / $sectorCount sectors)"
-                MifareClassic.TYPE_PLUS -> "MIFARE Plus (${mifare.size} bytes)"
-                MifareClassic.TYPE_PRO -> "MIFARE Pro (${mifare.size} bytes)"
-                else -> "MIFARE Unknown (${mifare.size} bytes)"
+                MifareClassic.TYPE_CLASSIC -> "MIFARE Classic (${mifare.size}B / ${matchedCandidate.summaryLabel} で認証成功)"
+                MifareClassic.TYPE_PLUS -> "MIFARE Plus (${mifare.size}B / ${matchedCandidate.summaryLabel})"
+                MifareClassic.TYPE_PRO -> "MIFARE Pro (${mifare.size}B / ${matchedCandidate.summaryLabel})"
+                else -> "MIFARE (${mifare.size}B / ${matchedCandidate.summaryLabel})"
             }
 
             // 5. 16バイトブロックデータから学籍番号を抽出

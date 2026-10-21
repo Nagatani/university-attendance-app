@@ -14,6 +14,7 @@ import android.hardware.usb.UsbManager
 import android.os.Build
 import androidx.core.content.ContextCompat
 import jp.ac.university.attendance.data.preferences.MifareConfig
+import jp.ac.university.attendance.data.preferences.MifareKeyCandidate
 import jp.ac.university.attendance.data.preferences.MifareKeyType
 import jp.ac.university.attendance.nfc.MifareClassicReader
 import jp.ac.university.attendance.nfc.MifareReadResult
@@ -743,54 +744,96 @@ class UsbNfcReaderManager(
     }
 
     /**
-     * PC/SC Part 3 APDU で MIFARE Classic のセクター鍵ロード → 認証 → 16バイトブロック読取 → 学籍番号デコードを行う
+     * PC/SC Part 3 APDU で MIFARE Classic のセクター鍵候補を順にロード → 認証 → 16バイトブロック読取 → 学籍番号デコードを行う
      */
     private fun readMifareClassicOverCcid(
         cardUid: String,
         config: MifareConfig,
         readerDisplayName: String
     ): MifareReadResult {
-        val keyBytes = config.parseKeyBytes()
-            ?: return MifareReadResult.Error(
+        val keyCandidates = config.resolveKeyCandidatesForSector(config.sectorIndex)
+        if (keyCandidates.isEmpty()) {
+            return MifareReadResult.Error(
                 cardUid = cardUid,
                 title = "MIFARE鍵設定エラー",
-                message = "鍵情報が12桁の16進数（6バイト）ではありません。設定画面を確認してください。"
+                message = "有効な12桁の16進数キー（6バイト）が1件も指定されていません。設定画面の鍵テキストを確認してください。"
             )
+        }
 
         val absoluteBlock = UsbCcidProtocol.sectorToAbsoluteBlock(
             sectorIndex = config.sectorIndex,
             blockIndexInSector = config.blockIndexInSector
         )
 
-        // Step A: リーダーの揮発メモリへ6バイト鍵をロード (FF 82 ...)
-        // 機種ごとの差異を吸収するため (KeyStructure=0x00, Slot=0x00) -> (0x20, 0x00) -> (0x00, 0x01) の順に試行
-        val keyLoadCandidates = listOf(
+        val keyLoadStructures = listOf(
             Pair(0x00.toByte(), 0x00.toByte()),
             Pair(0x20.toByte(), 0x00.toByte()),
             Pair(0x00.toByte(), 0x01.toByte())
         )
 
-        var loadedKeySlot: Byte? = null
-        var lastLoadSw = ""
-        for ((structure, slot) in keyLoadCandidates) {
-            val loadResp = transmitApdu(
-                UsbCcidProtocol.buildLoadKeyApdu(
-                    keyBytes = keyBytes,
-                    keyStructure = structure,
-                    keySlot = slot
+        var matchedCandidate: MifareKeyCandidate? = null
+        var lastAuthSw = ""
+        var anyKeyLoaded = false
+
+        // 一括設定された鍵候補を優先順に試行
+        for ((index, candidate) in keyCandidates.withIndex()) {
+            if (index > 0) {
+                // 認証失敗後はMIFAREカードがHALT状態になるため、IccPowerOnで再アクティブ化してから次の鍵を試行
+                sendCcidCommand(UsbCcidProtocol.buildIccPowerOn(slot = 0x00, seq = nextSeq()))
+            }
+
+            val keyBytes = candidate.toKeyBytes()
+            var loadedSlot: Byte? = null
+            for ((structure, slot) in keyLoadStructures) {
+                val loadResp = transmitApdu(
+                    UsbCcidProtocol.buildLoadKeyApdu(
+                        keyBytes = keyBytes,
+                        keyStructure = structure,
+                        keySlot = slot
+                    )
+                )
+                if (loadResp != null && loadResp.isSuccess) {
+                    loadedSlot = slot
+                    anyKeyLoaded = true
+                    break
+                }
+                if (loadResp != null) {
+                    lastAuthSw = loadResp.statusHex
+                }
+            }
+
+            if (loadedSlot == null) continue
+
+            // セクター認証 (General Authenticate: FF 86 ... または旧式 FF 88 ...)
+            val authResp = transmitApdu(
+                UsbCcidProtocol.buildGeneralAuthenticateApdu(
+                    absoluteBlock = absoluteBlock,
+                    keyType = candidate.keyType,
+                    keySlot = loadedSlot
                 )
             )
-            if (loadResp != null && loadResp.isSuccess) {
-                loadedKeySlot = slot
-                break
+
+            val ok = if (authResp != null && authResp.isSuccess) {
+                true
+            } else {
+                if (authResp != null) lastAuthSw = authResp.statusHex
+                val legacyResp = transmitApdu(
+                    UsbCcidProtocol.buildLegacyAuthenticateApdu(
+                        absoluteBlock = absoluteBlock,
+                        keyType = candidate.keyType,
+                        keySlot = loadedSlot
+                    )
+                )
+                legacyResp != null && legacyResp.isSuccess
             }
-            if (loadResp != null) {
-                lastLoadSw = loadResp.statusHex
+
+            if (ok) {
+                matchedCandidate = candidate
+                break
             }
         }
 
-        if (loadedKeySlot == null) {
-            // もしテスト用UIDフォールバックが有効ならUIDを返す
+        if (!anyKeyLoaded) {
             if (config.allowUidFallback) {
                 val dummyBlock = MifareClassicReader.createSimulatedBlock(cardUid)
                 return MifareReadResult.Success(
@@ -807,33 +850,11 @@ class UsbNfcReaderManager(
             return MifareReadResult.Error(
                 cardUid = cardUid,
                 title = "USBリーダー鍵ロードエラー",
-                message = "USB NFCリーダー ($readerDisplayName) へのMIFARE鍵ロードコマンド (FF 82) が失敗しました (SW=$lastLoadSw)。"
+                message = "USB NFCリーダー ($readerDisplayName) へのMIFARE鍵ロードコマンド (FF 82) が失敗しました (SW=$lastAuthSw)。"
             )
         }
 
-        // Step B: セクター認証 (General Authenticate: FF 86 ... または旧式 FF 88 ...)
-        val authResp = transmitApdu(
-            UsbCcidProtocol.buildGeneralAuthenticateApdu(
-                absoluteBlock = absoluteBlock,
-                keyType = config.keyType,
-                keySlot = loadedKeySlot
-            )
-        )
-
-        val isAuthenticated = if (authResp != null && authResp.isSuccess) {
-            true
-        } else {
-            val legacyResp = transmitApdu(
-                UsbCcidProtocol.buildLegacyAuthenticateApdu(
-                    absoluteBlock = absoluteBlock,
-                    keyType = config.keyType,
-                    keySlot = loadedKeySlot
-                )
-            )
-            legacyResp != null && legacyResp.isSuccess
-        }
-
-        if (!isAuthenticated) {
+        if (matchedCandidate == null) {
             if (config.allowUidFallback) {
                 val dummyBlock = MifareClassicReader.createSimulatedBlock(cardUid)
                 return MifareReadResult.Success(
@@ -847,12 +868,12 @@ class UsbNfcReaderManager(
                     isUidFallback = true
                 )
             }
-            val swInfo = authResp?.statusHex ?: "タイムアウト"
+            val swInfo = lastAuthSw.ifEmpty { "認証失敗" }
             return MifareReadResult.AuthFailed(
                 cardUid = cardUid,
                 sectorIndex = config.sectorIndex,
-                keyType = config.keyType,
-                message = "USBリーダーでのセクター ${config.sectorIndex} (Block #$absoluteBlock) の ${config.keyType.displayName} 認証に失敗しました (SW=$swInfo)。鍵情報またはカード種別を確認してください。"
+                keyType = keyCandidates.first().keyType,
+                message = "USBリーダーでセクター ${config.sectorIndex} (Block #$absoluteBlock) に対し、指定された計 ${keyCandidates.size} 通りの鍵候補すべてで認証に失敗しました (SW=$swInfo)。"
             )
         }
 
@@ -874,7 +895,7 @@ class UsbNfcReaderManager(
         }
 
         val rawBlock = readResp.data
-        val readerDesc = "USB CCID ($readerDisplayName)"
+        val readerDesc = "USB CCID ($readerDisplayName / ${matchedCandidate.summaryLabel})"
 
         // Step D: 読み取った16バイトブロックから学籍番号をデコード
         return when (val outcome = MifareClassicReader.extractStudentIdFromBlock(rawBlock, config)) {

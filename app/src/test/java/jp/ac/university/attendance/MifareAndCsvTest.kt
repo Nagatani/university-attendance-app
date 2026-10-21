@@ -2,6 +2,7 @@ package jp.ac.university.attendance
 
 import jp.ac.university.attendance.data.local.AttendanceExportRow
 import jp.ac.university.attendance.data.preferences.MifareConfig
+import jp.ac.university.attendance.data.preferences.MifareKeyTextParser
 import jp.ac.university.attendance.data.preferences.MifareKeyType
 import jp.ac.university.attendance.data.preferences.StudentIdEncoding
 import jp.ac.university.attendance.export.CsvExportManager
@@ -18,7 +19,7 @@ class MifareAndCsvTest {
 
     @Test
     fun parseKeyBytes_validAndInvalidHex() {
-        val validConfig = MifareConfig(keyHex = "A0A1A2A3A4A5")
+        val validConfig = MifareConfig(keyHex = "A0A1A2A3A4A5", bulkKeysText = "A0A1A2A3A4A5")
         val bytes = validConfig.parseKeyBytes()
         assertArrayEquals(
             byteArrayOf(
@@ -32,11 +33,47 @@ class MifareAndCsvTest {
             bytes
         )
 
-        val invalidShort = MifareConfig(keyHex = "FFFF")
+        val invalidShort = MifareConfig(keyHex = "FFFF", bulkKeysText = "FFFF")
         assertNull(invalidShort.parseKeyBytes())
 
-        val invalidChars = MifareConfig(keyHex = "ZZZZZZZZZZZZ")
+        val invalidChars = MifareConfig(keyHex = "ZZZZZZZZZZZZ", bulkKeysText = "ZZZZZZZZZZZZ")
         assertNull(invalidChars.parseKeyBytes())
+    }
+
+    @Test
+    fun bulkKeyTextParser_parsesMultiLineAndSectorSpecificKeys() {
+        val bulkText = """
+            # 共通の初期鍵
+            FFFFFFFFFFFF
+            A0A1A2A3A4A5 # MAD鍵
+            1:B:112233445566
+            2:AABBCCDDEEFF:665544332211
+            [Sector: 3]
+            D3F7D3F7D3F7
+        """.trimIndent()
+
+        val summary = MifareKeyTextParser.parseBulkText(
+            rawText = bulkText,
+            defaultKeyType = MifareKeyType.KEY_A,
+            tryBothKeyTypesForPlainLines = true
+        )
+        assertTrue(summary.isValid)
+        assertTrue(summary.invalidLines.isEmpty())
+
+        val configSector1 = MifareConfig(
+            sectorIndex = 1,
+            keyType = MifareKeyType.KEY_A,
+            bulkKeysText = bulkText,
+            tryBothKeyTypes = false
+        )
+        val candidatesS1 = configSector1.resolveKeyCandidatesForSector(targetSector = 1)
+        // Sector 1 固有の 112233445566 (Key B) が最優先され、その後に共通鍵 FFFFFFFFFFFF, A0A1A2A3A4A5 (Key A) が続く
+        assertEquals(3, candidatesS1.size)
+        assertEquals("112233445566", candidatesS1[0].keyHex)
+        assertEquals(MifareKeyType.KEY_B, candidatesS1[0].keyType)
+        assertEquals("FFFFFFFFFFFF", candidatesS1[1].keyHex)
+        assertEquals(MifareKeyType.KEY_A, candidatesS1[1].keyType)
+        assertEquals("A0A1A2A3A4A5", candidatesS1[2].keyHex)
     }
 
     @Test

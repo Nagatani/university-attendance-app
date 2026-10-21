@@ -6,11 +6,11 @@ plugins {
 }
 
 android {
-    namespace = "jp.ac.university.attendance"
+    namespace = "app.nagatani.dev.attendance"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "jp.ac.university.attendance"
+        applicationId = "app.nagatani.dev.attendance"
         minSdk = 26
         targetSdk = 34
         versionCode = 1

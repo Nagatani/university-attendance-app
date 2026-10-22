@@ -108,6 +108,12 @@ val resolvedKeyPassword = resolveSigningParam(
 )
 val enableReleaseMinify = (providers.gradleProperty("releaseMinify").orNull ?: "false").toBoolean()
 
+// 標準のビルド出力名 (app-release.apk / app-release.aab) を
+// university-attendance-latest-release.apk / university-attendance-latest-release.aab に変更
+base {
+    archivesName.set("university-attendance-latest")
+}
+
 android {
     namespace = "app.nagatani.dev.attendance"
     compileSdk = 34
@@ -222,8 +228,9 @@ fun computeSha256Hex(file: File): String {
 
 /**
  * 1. リリース署名キーストアの確認・生成タスク
+ * ※Android Studio の Gradle ツールウィンドウに確実に表示されるよう tasks.create で即時登録
  */
-val generateReleaseKeystore by tasks.registering {
+val generateReleaseKeystore = tasks.create("generateReleaseKeystore") {
     group = "release"
     description = "リリース署名用のキーストア (keystore/release-keystore.jks) と keystore.properties を確認・自動生成します"
 
@@ -245,16 +252,25 @@ val generateReleaseKeystore by tasks.registering {
 /**
  * 2. 署名済みリリースAPKをビルドし、プロジェクト直下の release/ フォルダにコピー＆SHA-256出力するタスク
  */
-val buildReleaseApk by tasks.registering {
+val buildReleaseApk = tasks.create("buildReleaseApk") {
     group = "release"
     description = "署名済みリリースAPKをビルドし、release/ フォルダへバージョン名付きAPKとSHA-256チェックサムを出力します"
     dependsOn(generateReleaseKeystore, "assembleRelease")
+    mustRunAfter("testReleaseUnitTest")
 
     doLast {
         val apkSourceDir = layout.buildDirectory.dir("outputs/apk/release").get().asFile
+        // 古い app-release.apk が残っている場合は新しい university-attendance-latest-release.apk を優先
         val builtApk = apkSourceDir.walkTopDown()
-            .firstOrNull { it.isFile && it.extension == "apk" }
+            .filter { it.isFile && it.extension == "apk" }
+            .sortedByDescending { it.name.startsWith("university-attendance") }
+            .firstOrNull()
             ?: throw GradleException("リリースAPKが生成されませんでした: ${apkSourceDir.absolutePath}")
+
+        val staleAppReleaseApk = File(apkSourceDir, "app-release.apk")
+        if (staleAppReleaseApk.exists() && builtApk != staleAppReleaseApk) {
+            staleAppReleaseApk.delete()
+        }
 
         releaseDistDir.mkdirs()
 
@@ -314,22 +330,34 @@ val buildReleaseApk by tasks.registering {
 /**
  * 3. リリース用 Android App Bundle (.aab) をビルドして release/ フォルダへ出力するタスク
  */
-val buildReleaseBundle by tasks.registering {
+val buildReleaseBundle = tasks.create("buildReleaseBundle") {
     group = "release"
     description = "リリース用 Android App Bundle (.aab) をビルドし、release/ フォルダへ出力します"
     dependsOn(generateReleaseKeystore, "bundleRelease")
+    mustRunAfter("testReleaseUnitTest")
 
     doLast {
         val bundleSourceDir = layout.buildDirectory.dir("outputs/bundle/release").get().asFile
         val builtAab = bundleSourceDir.walkTopDown()
-            .firstOrNull { it.isFile && it.extension == "aab" }
+            .filter { it.isFile && it.extension == "aab" }
+            .sortedByDescending { it.name.startsWith("university-attendance") }
+            .firstOrNull()
             ?: throw GradleException("リリースAABが生成されませんでした: ${bundleSourceDir.absolutePath}")
+
+        val staleAppReleaseAab = File(bundleSourceDir, "app-release.aab")
+        if (staleAppReleaseAab.exists() && builtAab != staleAppReleaseAab) {
+            staleAppReleaseAab.delete()
+        }
 
         releaseDistDir.mkdirs()
 
         val versionedAabName = "university-attendance-v${appVersionName}-b${appVersionCode}-release.aab"
+        val latestAabName = "university-attendance-latest-release.aab"
         val versionedAabFile = File(releaseDistDir, versionedAabName)
+        val latestAabFile = File(releaseDistDir, latestAabName)
+
         builtAab.copyTo(versionedAabFile, overwrite = true)
+        builtAab.copyTo(latestAabFile, overwrite = true)
 
         val sha256 = computeSha256Hex(versionedAabFile)
         File(releaseDistDir, "$versionedAabName.sha256").writeText("$sha256  $versionedAabName\n")
@@ -338,6 +366,7 @@ val buildReleaseBundle by tasks.registering {
         println("============================================================")
         println("[Release AAB Bundle Build Succeeded]")
         println("Output AAB  : ${versionedAabFile.absolutePath}")
+        println("Latest Copy : ${latestAabFile.absolutePath}")
         println("File Size   : $sizeMb")
         println("SHA-256     : $sha256")
         println("============================================================")
@@ -347,7 +376,7 @@ val buildReleaseBundle by tasks.registering {
 /**
  * 4. ユニットテスト実行 ＋ リリースAPK ＆ リリースAAB を一括生成する総合配布タスク
  */
-val packageReleaseDistribution by tasks.registering {
+val packageReleaseDistribution = tasks.create("packageReleaseDistribution") {
     group = "release"
     description = "Releaseユニットテストを実行した上で、署名済みリリースAPKとAABの両方を release/ フォルダへ一括生成します"
     dependsOn("testReleaseUnitTest", buildReleaseApk, buildReleaseBundle)
@@ -363,17 +392,10 @@ val packageReleaseDistribution by tasks.registering {
     }
 }
 
-tasks.named("buildReleaseApk") {
-    mustRunAfter("testReleaseUnitTest")
-}
-tasks.named("buildReleaseBundle") {
-    mustRunAfter("testReleaseUnitTest")
-}
-
 /**
  * 5. 署名済みリリースAPKをビルドして、USB/Wi-Fi接続中のAndroidタブレットへ直接インストールするタスク
  */
-val installReleaseApk by tasks.registering {
+val installReleaseApk = tasks.create("installReleaseApk") {
     group = "release"
     description = "署名済みリリースAPKをビルドし、接続中のAndroidタブレット実機へ adb install -r でインストールします"
     dependsOn(buildReleaseApk)
@@ -419,8 +441,14 @@ val installReleaseApk by tasks.registering {
 /**
  * 6. release/ 配布フォルダのクリーンアップタスク
  */
-val cleanReleaseDistribution by tasks.registering(Delete::class) {
+val cleanReleaseDistribution = tasks.create("cleanReleaseDistribution", Delete::class.java) {
     group = "release"
     description = "プロジェクト直下の release/ 配布出力フォルダをクリーンアップします"
     delete(releaseDistDir)
+}
+
+// Android Studio の Gradle ツールウィンドウで標準の assembleRelease / bundleRelease も非表示にならないよう実体化
+afterEvaluate {
+    tasks.findByName("assembleRelease")
+    tasks.findByName("bundleRelease")
 }

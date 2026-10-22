@@ -90,8 +90,23 @@ university-attendance-app/
 
 ## ビルド・実行方法
 
+### デバッグ実行
 1. **Android Studio**（Ladybug / Koala 以降推奨）を起動し、**Open** からこのプロジェクトフォルダ（`/Users/nagatani/.gemini/antigravity/scratch/university-attendance-app`）を開きます。
 2. Gradle Sync が完了したら、Androidタブレット実機（またはエミュレータ）を接続して **Run (`app`)** を実行してください。
 
+### リリースビルド用 Gradle タスク（`release` グループ）
+[app/build.gradle.kts](app/build.gradle.kts) にリリースビルド・署名・実機配布用の専用 Gradle タスクを定義しています。Android Studio 右側の **Gradle ツールウィンドウ (`app` → `Tasks` → `release`)** またはターミナルから実行できます。
+
+| タスク名 | 説明 |
+| :--- | :--- |
+| `generateReleaseKeystore` | リリース署名用キーストア（`keystore/release-keystore.jks`）と `keystore.properties` が未作成の場合、JDK の `keytool` で自動生成します |
+| `buildReleaseApk` | 署名済みリリース APK をビルドし、プロジェクト直下の `release/` フォルダにバージョン名付き APK・`university-attendance-latest-release.apk`・SHA-256・`release-info.txt` を出力します |
+| `buildReleaseBundle` | Google Play / 社内配信用の署名済み Android App Bundle (`.aab`) をビルドし、`release/` フォルダへ出力します |
+| `packageReleaseDistribution` | リリース用単体テスト（`testReleaseUnitTest`）を実行した上で、`buildReleaseApk` と `buildReleaseBundle` を一括実行します |
+| `installReleaseApk` | `buildReleaseApk` で署名済みリリース APK を作成し、USB デバッグ接続中の Android タブレットへ `adb install -r` で直接インストールします |
+| `cleanReleaseDistribution` | `release/` 配布フォルダをクリーンアップします |
+
+> **独自の署名キーストアを使用する場合**: プロジェクト直下の `keystore.properties`（初回ビルド時に自動生成）の `storeFile` / `storePassword` / `keyAlias` / `keyPassword` を書き換えるか、`-PRELEASE_STORE_FILE=...` 等の Gradle プロパティ／環境変数で指定できます。また R8 コード圧縮を有効にする場合は `-PreleaseMinify=true` を付与してください。
+
 > **ハードウェアに関する補足（MIFARE Classic 対応について）**
-> MIFARE Classic の独自の暗号化方式（Crypto-1）によるセクター認証（`authenticateSectorWithKeyA/B`）を行うには、Androidタブレット本体の内蔵NFCコントローラが **NXP製チップ等（MIFARE Classicサポート対象チップ）** である必要があります。なお、検証時にMIFARE Classic非対応カードでもテストしたい場合は、「MIFARE鍵設定」画面の「テスト用フォールバック（UID読み取り）」をONにするか、「テスト読取」ボタンをご利用いただけます。
+> MIFARE Classic の独自の暗号化方式（Crypto-1）によるセクター認証（`authenticateSectorWithKeyA/B`）を行うには、Androidタブレット本体の内蔵NFCコントローラが **NXP製チップ等（MIFARE Classicサポート対象チップ）** であるか、または **Sony RC-S300 / ACS ACR122U 等の外付け USB NFC リーダー** を接続してください。なお、検証時にMIFARE Classic非対応カードでもテストしたい場合は、「MIFARE鍵設定」画面の「テスト用フォールバック（UID読み取り）」をONにするか、「テスト読取」ボタンをご利用いただけます。

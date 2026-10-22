@@ -361,24 +361,43 @@ data class MifareConfig(
     /**
      * 指定したセクター番号 [targetSector] の認証に試行すべき鍵候補リストを優先順で返す。
      * 1. セクター番号が明示的に一致するルール (例: `1:A:xxxxxxxxxxxx`) を最優先
-     * 2. セクター指定なしの共通ルール (例: `FFFFFFFFFFFF`) を記述順に試行
+     * 2. セクター指定なしの共通ルールにおいて、ユーザー指定のカスタム鍵（非FFFFFFFFFFFF）を工場出荷時鍵（FFFFFFFFFFFF）より優先
+     * 3. もし対象セクター向けの候補が0件で他セクター指定の鍵のみ存在する場合は、それらもフォールバック候補に含める
      */
     fun resolveKeyCandidatesForSector(targetSector: Int = sectorIndex): List<MifareKeyCandidate> {
         val summary = parseBulkKeys()
-        val sectorSpecific = summary.candidates.filter { it.targetSector == targetSector }
-        val wildcard = summary.candidates.filter { it.targetSector == null }
-        val combined = sectorSpecific + wildcard
+        val sectorSpecific = summary.candidates
+            .filter { it.targetSector == targetSector }
+            .sortedBy { it.keyHex == "FFFFFFFFFFFF" }
+        val wildcard = summary.candidates
+            .filter { it.targetSector == null }
+            .sortedBy { it.keyHex == "FFFFFFFFFFFF" }
+        val rawCombined = (sectorSpecific + wildcard).ifEmpty {
+            summary.candidates.sortedBy { it.keyHex == "FFFFFFFFFFFF" }
+        }
 
         // 同一 (keyType, keyHex) の重複を除去して順序を維持
         val seen = HashSet<String>()
         val deduplicated = mutableListOf<MifareKeyCandidate>()
-        for (c in combined) {
+        for (c in rawCombined) {
             val sig = "${c.keyType.name}:${c.keyHex}"
             if (seen.add(sig)) {
                 deduplicated.add(c)
             }
         }
         return deduplicated
+    }
+
+    /**
+     * 優先して試行すべきセクター番号の順序リストを返す。
+     * 1. 設定された [sectorIndex]
+     * 2. 一括鍵テキスト内で明示的にセクター指定されている番号（例: `2:A:...` の `2`）
+     */
+    fun resolvePrioritySectors(): List<Int> {
+        val explicitSectors = parseBulkKeys().candidates
+            .mapNotNull { it.targetSector }
+            .filter { it in 0..39 }
+        return (listOf(sectorIndex) + explicitSectors).distinct()
     }
 
     /**

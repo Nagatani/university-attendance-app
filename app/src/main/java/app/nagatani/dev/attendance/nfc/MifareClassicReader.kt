@@ -138,24 +138,33 @@ object MifareClassicReader {
                 )
             }
 
-            // 3. 候補キーを順番に試行してセクター認証（Key A または Key B）
+            // 3. 候補セクター（指定セクターおよび鍵リストで明示指定されたセクター）に対して候補キーを順番に試行
+            val prioritySectors = config.resolvePrioritySectors().filter { it in 0 until sectorCount }
             var matchedCandidate: MifareKeyCandidate? = null
-            for ((index, candidate) in keyCandidates.withIndex()) {
-                if (index > 0) {
-                    // MIFARE Classic仕様上、認証失敗後は一度HALT状態になるため再接続してから次の鍵を試行
-                    runCatching {
-                        mifare.close()
-                        mifare.connect()
+            var matchedSector: Int = config.sectorIndex
+            var attemptIndex = 0
+
+            outerLoop@ for (sectorToTry in prioritySectors) {
+                val candidatesForSector = config.resolveKeyCandidatesForSector(sectorToTry)
+                for (candidate in candidatesForSector) {
+                    if (attemptIndex > 0) {
+                        // MIFARE Classic仕様上、認証失敗後は一度HALT状態になるため再接続してから次の鍵を試行
+                        runCatching {
+                            mifare.close()
+                            mifare.connect()
+                        }
                     }
-                }
-                val keyBytes = candidate.toKeyBytes()
-                val ok = when (candidate.keyType) {
-                    MifareKeyType.KEY_A -> mifare.authenticateSectorWithKeyA(config.sectorIndex, keyBytes)
-                    MifareKeyType.KEY_B -> mifare.authenticateSectorWithKeyB(config.sectorIndex, keyBytes)
-                }
-                if (ok) {
-                    matchedCandidate = candidate
-                    break
+                    attemptIndex++
+                    val keyBytes = candidate.toKeyBytes()
+                    val ok = when (candidate.keyType) {
+                        MifareKeyType.KEY_A -> mifare.authenticateSectorWithKeyA(sectorToTry, keyBytes)
+                        MifareKeyType.KEY_B -> mifare.authenticateSectorWithKeyB(sectorToTry, keyBytes)
+                    }
+                    if (ok) {
+                        matchedCandidate = candidate
+                        matchedSector = sectorToTry
+                        break@outerLoop
+                    }
                 }
             }
 
@@ -169,14 +178,18 @@ object MifareClassicReader {
             }
 
             // 4. 対象ブロックの絶対インデックス計算と16バイト読み取り
-            val absoluteBlockIndex = mifare.sectorToBlock(config.sectorIndex) + config.blockIndexInSector
+            val safeBlockInSector = config.blockIndexInSector.coerceIn(
+                0,
+                (mifare.getBlockCountInSector(matchedSector) - 1).coerceAtLeast(0)
+            )
+            val absoluteBlockIndex = mifare.sectorToBlock(matchedSector) + safeBlockInSector
             val rawBlock = mifare.readBlock(absoluteBlockIndex)
 
             val cardTypeDesc = when (mifare.type) {
-                MifareClassic.TYPE_CLASSIC -> "MIFARE Classic (${mifare.size}B / ${matchedCandidate.summaryLabel} で認証成功)"
-                MifareClassic.TYPE_PLUS -> "MIFARE Plus (${mifare.size}B / ${matchedCandidate.summaryLabel})"
-                MifareClassic.TYPE_PRO -> "MIFARE Pro (${mifare.size}B / ${matchedCandidate.summaryLabel})"
-                else -> "MIFARE (${mifare.size}B / ${matchedCandidate.summaryLabel})"
+                MifareClassic.TYPE_CLASSIC -> "MIFARE Classic (${mifare.size}B / Sector $matchedSector / ${matchedCandidate.summaryLabel} で認証成功)"
+                MifareClassic.TYPE_PLUS -> "MIFARE Plus (${mifare.size}B / Sector $matchedSector / ${matchedCandidate.summaryLabel})"
+                MifareClassic.TYPE_PRO -> "MIFARE Pro (${mifare.size}B / Sector $matchedSector / ${matchedCandidate.summaryLabel})"
+                else -> "MIFARE (${mifare.size}B / Sector $matchedSector / ${matchedCandidate.summaryLabel})"
             }
 
             // 5. 16バイトブロックデータから学籍番号を抽出
@@ -185,8 +198,8 @@ object MifareClassicReader {
                     cardUid = cardUid,
                     studentId = parseOutcome.studentId,
                     rawBlockBytes = rawBlock,
-                    sectorIndex = config.sectorIndex,
-                    blockIndexInSector = config.blockIndexInSector,
+                    sectorIndex = matchedSector,
+                    blockIndexInSector = safeBlockInSector,
                     absoluteBlockIndex = absoluteBlockIndex,
                     cardTypeDescription = cardTypeDesc
                 )
@@ -194,8 +207,8 @@ object MifareClassicReader {
                 is BlockParseOutcome.Invalid -> MifareReadResult.ParseFailed(
                     cardUid = cardUid,
                     rawBlockBytes = rawBlock,
-                    sectorIndex = config.sectorIndex,
-                    blockIndexInSector = config.blockIndexInSector,
+                    sectorIndex = matchedSector,
+                    blockIndexInSector = safeBlockInSector,
                     absoluteBlockIndex = absoluteBlockIndex,
                     reason = parseOutcome.reason
                 )

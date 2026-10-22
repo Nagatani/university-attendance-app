@@ -81,22 +81,49 @@ object UsbCcidProtocol {
     const val MSG_PC_TO_RDR_ICC_POWER_ON: Byte = 0x62
     const val MSG_PC_TO_RDR_ICC_POWER_OFF: Byte = 0x63
     const val MSG_PC_TO_RDR_GET_SLOT_STATUS: Byte = 0x65
+    const val MSG_PC_TO_RDR_ESCAPE: Byte = 0x6B
     const val MSG_PC_TO_RDR_XFR_BLOCK: Byte = 0x6F
 
     // CCID Bulk-IN メッセージタイプ
     const val MSG_RDR_TO_PC_DATA_BLOCK: Byte = 0x80.toByte()
     const val MSG_RDR_TO_PC_SLOT_STATUS: Byte = 0x81.toByte()
+    const val MSG_RDR_TO_PC_ESCAPE: Byte = 0x83.toByte()
+
+    // Sony Vendor ID および PaSoRi RC-S300 シリーズ Product ID
+    const val SONY_VENDOR_ID: Int = 0x054C
+    val SONY_RCS300_PRODUCT_IDS = setOf(
+        0x0DC8, // Sony RC-S300/S (業務用・法人向けモデル)
+        0x0DC9  // Sony RC-S300 / RC-S300/P (個人向けモデル)
+    )
 
     // 主要な外付けNFCリーダーのUSB Vendor ID一覧
     val KNOWN_NFC_VENDOR_IDS = setOf(
         0x072F, // ACS (ACR122U, ACR1252U, ACR1281U 等)
-        0x054C, // Sony (PaSoRi RC-S300, RC-S380 等)
+        SONY_VENDOR_ID, // Sony (PaSoRi RC-S300, RC-S380 等)
         0x04E6, // Identiv / SCM Microsystems (uTrust 3700F 等)
         0x076B, // HID Global (OMNIKEY 5022, 5427 等)
         0x1FC9, // NXP Semiconductors
         0x096E, // Feitian Technologies
         0x08E6, // Thales / Gemalto
         0x31AA  // AB Circle
+    )
+
+    // Sony RC-S300 ダイレクトUSB制御用 Escape / Transparent Session コマンド群
+    // (PC/SCドライバを介さないAndroid USBホスト接続時にType A / MIFAREモードを確実化するために使用)
+    val SONY_CMD_END_TRANSPARENT = byteArrayOf(
+        0xFF.toByte(), 0x50, 0x00, 0x00, 0x02, 0x82.toByte(), 0x00, 0x00
+    )
+    val SONY_CMD_START_TRANSPARENT = byteArrayOf(
+        0xFF.toByte(), 0x50, 0x00, 0x00, 0x02, 0x81.toByte(), 0x00, 0x00
+    )
+    val SONY_CMD_SWITCH_PROTOCOL_TYPE_A = byteArrayOf(
+        0xFF.toByte(), 0x50, 0x00, 0x02, 0x04, 0x8F.toByte(), 0x02, 0x00, 0x03, 0x00
+    )
+    val SONY_CMD_TURN_ON_RF = byteArrayOf(
+        0xFF.toByte(), 0x50, 0x00, 0x00, 0x02, 0x84.toByte(), 0x00, 0x00
+    )
+    val SONY_CMD_TURN_OFF_RF = byteArrayOf(
+        0xFF.toByte(), 0x50, 0x00, 0x00, 0x02, 0x83.toByte(), 0x00, 0x00
     )
 
     /**
@@ -142,8 +169,12 @@ object UsbCcidProtocol {
         return frame
     }
 
-    fun buildIccPowerOn(slot: Byte = 0x00, seq: Byte): ByteArray =
-        buildCcidFrame(MSG_PC_TO_RDR_ICC_POWER_ON, slot = slot, seq = seq, param1 = 0x00)
+    /**
+     * PC_to_RDR_IccPowerOn (0x62)
+     * @param voltageSelect bPowerSelect: 0x00=Auto, 0x01=5.0V, 0x02=3.0V, 0x03=1.8V
+     */
+    fun buildIccPowerOn(slot: Byte = 0x00, seq: Byte, voltageSelect: Byte = 0x00): ByteArray =
+        buildCcidFrame(MSG_PC_TO_RDR_ICC_POWER_ON, slot = slot, seq = seq, param1 = voltageSelect)
 
     fun buildIccPowerOff(slot: Byte = 0x00, seq: Byte): ByteArray =
         buildCcidFrame(MSG_PC_TO_RDR_ICC_POWER_OFF, slot = slot, seq = seq)
@@ -153,6 +184,13 @@ object UsbCcidProtocol {
 
     fun buildXfrBlock(slot: Byte = 0x00, seq: Byte, apdu: ByteArray): ByteArray =
         buildCcidFrame(MSG_PC_TO_RDR_XFR_BLOCK, slot = slot, seq = seq, param1 = 0x00, payload = apdu)
+
+    /**
+     * PC_to_RDR_Escape (0x6B)
+     * Sony RC-S300 等のダイレクト制御フレーム送信に使用
+     */
+    fun buildEscapeBlock(slot: Byte = 0x00, seq: Byte, payload: ByteArray): ByteArray =
+        buildCcidFrame(MSG_PC_TO_RDR_ESCAPE, slot = slot, seq = seq, param1 = 0x00, payload = payload)
 
     // =========================================================
     // PC/SC Part 3 Contactless APDU ビルダー
@@ -629,30 +667,35 @@ class UsbNfcReaderManager(
     }
 
     /**
-     * バックグラウンドでUSB CCIDリーダーのカード有無を監視し、学生証がかざされた瞬間にMIFARE認証＆ブロック読み取りを実行する
+     * バックグラウンドでUSB CCIDリーダーのカード有無を監視し、学生証がかざされた瞬間にMIFARE認証＆ブロック読み取りを実行する。
+     * Sony PaSoRi RC-S300 (VID:054C / PID:0DC8, 0DC9) のCCID自動アクティベーション挙動および
+     * MIFARE Classic 認証失敗時のHALT状態からの復帰（IccPowerOff -> IccPowerOn）に完全対応。
      */
     private suspend fun runCcidPollingLoop(
         deviceName: String,
         vendorId: Int,
         productId: Int
     ) {
+        val isSonyReader = vendorId == UsbCcidProtocol.SONY_VENDOR_ID
         var lastProcessedCardUid: String? = null
+        var lastProcessedConfigSig: String = ""
+        var lastFailedEmitMillis: Long = 0L
         var consecutiveIoErrors = 0
 
         while (scope.isActive && activeConnection != null) {
             try {
-                // 1. スロット状態確認またはIccPowerOnでカード存在をチェック
+                // 1. スロット状態確認 (PC_to_RDR_GetSlotStatus: 0x65)
                 val slotStatusResp = sendCcidCommand(
                     UsbCcidProtocol.buildGetSlotStatus(slot = 0x00, seq = nextSeq())
                 )
 
-                // GetSlotStatusに対応していない一部リーダー、またはカードが存在する場合にIccPowerOnを試行
                 val cardDetectedBySlot = slotStatusResp == null || slotStatusResp.isCardPresent
 
                 if (!cardDetectedBySlot) {
-                    // カードがリーダーから離れたらリセットし、次のタッチを受け付け可能にする
-                    if (lastProcessedCardUid != null) {
+                    if (lastProcessedCardUid != null || lastFailedEmitMillis != 0L) {
                         lastProcessedCardUid = null
+                        lastProcessedConfigSig = ""
+                        lastFailedEmitMillis = 0L
                         _readerState.value = UsbReaderState.Connected(
                             deviceName = deviceName,
                             vendorId = vendorId,
@@ -661,45 +704,26 @@ class UsbNfcReaderManager(
                         )
                     }
                     consecutiveIoErrors = 0
-                    delay(220L)
+                    delay(200L)
                     continue
                 }
 
-                // 2. IccPowerOn (0x62) を送信して非接触カードをアクティブ化
-                val powerOnResp = sendCcidCommand(
-                    UsbCcidProtocol.buildIccPowerOn(slot = 0x00, seq = nextSeq())
-                )
-
-                val atrAvailable = powerOnResp != null &&
-                    powerOnResp.commandStatus == 0 &&
-                    powerOnResp.payload.isNotEmpty()
-
-                if (!atrAvailable) {
-                    // カードがまだRFフィールド内にない
-                    if (lastProcessedCardUid != null) {
-                        lastProcessedCardUid = null
-                        _readerState.value = UsbReaderState.Connected(
-                            deviceName = deviceName,
-                            vendorId = vendorId,
-                            productId = productId,
-                            cardPresent = false
-                        )
-                    }
-                    consecutiveIoErrors = 0
-                    delay(250L)
-                    continue
-                }
-
-                // 3. カードUID取得 (FF CA 00 00 00)
-                val uidApduResp = transmitApdu(UsbCcidProtocol.buildGetUidApdu())
-                val currentUid = if (uidApduResp != null && uidApduResp.isSuccess && uidApduResp.data.isNotEmpty()) {
-                    MifareClassicReader.bytesToHex(uidApduResp.data, separator = "")
-                } else {
-                    ""
-                }
+                // 2. カードをアクティブ化してUIDを取得
+                val currentUid = activateCardAndGetUid(isSonyReader = isSonyReader)
 
                 if (currentUid.isEmpty()) {
-                    delay(250L)
+                    if (lastProcessedCardUid != null) {
+                        lastProcessedCardUid = null
+                        lastProcessedConfigSig = ""
+                        _readerState.value = UsbReaderState.Connected(
+                            deviceName = deviceName,
+                            vendorId = vendorId,
+                            productId = productId,
+                            cardPresent = false
+                        )
+                    }
+                    consecutiveIoErrors = 0
+                    delay(240L)
                     continue
                 }
 
@@ -711,25 +735,64 @@ class UsbNfcReaderManager(
                 )
                 consecutiveIoErrors = 0
 
-                // 同一カードが置かれっぱなしの場合はスキップ（一度離すまで再読取しない）
-                if (currentUid == lastProcessedCardUid) {
-                    delay(300L)
+                val config = configProvider()
+                val currentConfigSig = "${config.sectorIndex}:${config.blockIndexInSector}:${config.keyType}:${config.bulkKeysText}:${config.tryBothKeyTypesForPlainHex}:${config.encoding}:${config.byteOffset}:${config.byteLength}:${config.validationRegex}:${config.allowUidFallback}"
+
+                // 同一カードが置かれっぱなしで、かつ設定も変更されていない場合はスキップ
+                if (currentUid == lastProcessedCardUid && currentConfigSig == lastProcessedConfigSig) {
+                    delay(280L)
                     continue
                 }
 
-                // 4. 新しいカードタッチを検知 → MIFARE Classic セクター認証＆ブロック読み取りを実行
-                val config = configProvider()
-                val readResult = readMifareClassicOverCcid(
+                // RC-S300はカードがアンテナ端に近づいた瞬間にUID取得のみ先行成功するため、
+                // カードが密着してRF磁界が安定するまで少し待機してからMIFARE Crypto1認証を開始する
+                delay(65L)
+                reactivateCardOnSlot(isSonyReader = isSonyReader)
+
+                // 3. MIFARE Classic セクター認証＆ブロック読み取りを実行
+                var readResult = readMifareClassicOverCcid(
                     cardUid = currentUid,
                     config = config,
-                    readerDisplayName = deviceName
+                    readerDisplayName = deviceName,
+                    isSonyReader = isSonyReader
                 )
-                lastProcessedCardUid = currentUid
-                onCardReadResult(readResult)
 
-                // 読み取り完了後にIccPowerOffを送っておく
-                sendCcidCommand(UsbCcidProtocol.buildIccPowerOff(slot = 0x00, seq = nextSeq()))
-                delay(400L)
+                // かざす途中の不安定なタイミングで失敗した場合は、一度だけRF再起動して自動リトライ
+                if (readResult is MifareReadResult.AuthFailed || readResult is MifareReadResult.Error) {
+                    delay(120L)
+                    if (reactivateCardOnSlot(isSonyReader = isSonyReader)) {
+                        readResult = readMifareClassicOverCcid(
+                            cardUid = currentUid,
+                            config = config,
+                            readerDisplayName = deviceName,
+                            isSonyReader = isSonyReader
+                        )
+                    }
+                }
+
+                val now = System.currentTimeMillis()
+                when (readResult) {
+                    is MifareReadResult.Success,
+                    is MifareReadResult.ParseFailed -> {
+                        // ブロック読み取りまで成功した場合は、カードを離す（または設定変更）まで再読取をロック
+                        lastProcessedCardUid = currentUid
+                        lastProcessedConfigSig = currentConfigSig
+                        lastFailedEmitMillis = 0L
+                        onCardReadResult(readResult)
+                    }
+
+                    is MifareReadResult.AuthFailed,
+                    is MifareReadResult.Error -> {
+                        // 失敗時はカードを置き直したり設定を変更した際に再試行できるよう、クールダウン間隔で通知
+                        if (now - lastFailedEmitMillis >= 1800L || currentConfigSig != lastProcessedConfigSig) {
+                            lastFailedEmitMillis = now
+                            lastProcessedConfigSig = currentConfigSig
+                            onCardReadResult(readResult)
+                        }
+                    }
+                }
+
+                delay(350L)
             } catch (e: Exception) {
                 consecutiveIoErrors++
                 if (consecutiveIoErrors > 15) {
@@ -744,15 +807,123 @@ class UsbNfcReaderManager(
     }
 
     /**
+     * 非接触カードをIccPowerOnで起動し、PC/SC GetData (FF CA 00 00 00) でカードUIDを取得する。
+     * Sony RC-S300 で標準IccPowerOnのみではType A応答がない場合はEscapeコマンドによるType A切替も試行する。
+     */
+    private fun activateCardAndGetUid(isSonyReader: Boolean): String {
+        drainStaleBulkIn()
+
+        val voltages = byteArrayOf(0x00, 0x01, 0x02) // Auto, 5.0V, 3.0V
+        var powerOnSuccess = false
+        for (v in voltages) {
+            val resp = sendCcidCommand(
+                UsbCcidProtocol.buildIccPowerOn(slot = 0x00, seq = nextSeq(), voltageSelect = v)
+            )
+            if (resp != null && resp.commandStatus == 0 && resp.payload.isNotEmpty()) {
+                powerOnSuccess = true
+                break
+            }
+        }
+
+        if (powerOnSuccess) {
+            val uidResp = transmitApdu(UsbCcidProtocol.buildGetUidApdu())
+            if (uidResp != null && uidResp.isSuccess && uidResp.data.isNotEmpty()) {
+                return MifareClassicReader.bytesToHex(uidResp.data, separator = "")
+            }
+        }
+
+        // Sony RC-S300 向けフォールバック: Escape (0x6B) でType Aプロトコル有効化＆RF再起動を試行
+        if (isSonyReader) {
+            sendEscapeCommand(UsbCcidProtocol.SONY_CMD_START_TRANSPARENT)
+            sendEscapeCommand(UsbCcidProtocol.SONY_CMD_SWITCH_PROTOCOL_TYPE_A)
+            sendEscapeCommand(UsbCcidProtocol.SONY_CMD_TURN_ON_RF)
+            sendEscapeCommand(UsbCcidProtocol.SONY_CMD_END_TRANSPARENT)
+
+            val retryPowerOn = sendCcidCommand(
+                UsbCcidProtocol.buildIccPowerOn(slot = 0x00, seq = nextSeq(), voltageSelect = 0x00)
+            )
+            if (retryPowerOn != null && retryPowerOn.commandStatus == 0) {
+                val uidResp = transmitApdu(UsbCcidProtocol.buildGetUidApdu())
+                if (uidResp != null && uidResp.isSuccess && uidResp.data.isNotEmpty()) {
+                    return MifareClassicReader.bytesToHex(uidResp.data, separator = "")
+                }
+            }
+        }
+
+        return ""
+    }
+
+    /**
+     * MIFARE Classic 認証失敗によってHALT（非選択）状態に落ちたカードを復帰させるため、
+     * 確実に IccPowerOff (RF切断) -> 待機 -> IccPowerOn (RF再投入) -> GetUID (選択確認) を行う。
+     * ※Sony RC-S300 では IccPowerOff を挟まずに IccPowerOn のみを送ってもRF磁界がリセットされないため必須。
+     */
+    private fun reactivateCardOnSlot(isSonyReader: Boolean): Boolean {
+        drainStaleBulkIn()
+        sendCcidCommand(UsbCcidProtocol.buildIccPowerOff(slot = 0x00, seq = nextSeq()))
+        try {
+            Thread.sleep(50L)
+        } catch (_: InterruptedException) {
+        }
+
+        val voltages = byteArrayOf(0x00, 0x01)
+        var powered = false
+        for (v in voltages) {
+            val powerResp = sendCcidCommand(
+                UsbCcidProtocol.buildIccPowerOn(slot = 0x00, seq = nextSeq(), voltageSelect = v)
+            )
+            if (powerResp != null && powerResp.commandStatus == 0 && powerResp.payload.isNotEmpty()) {
+                powered = true
+                break
+            }
+        }
+
+        if (!powered && isSonyReader) {
+            sendEscapeCommand(UsbCcidProtocol.SONY_CMD_TURN_OFF_RF)
+            try {
+                Thread.sleep(35L)
+            } catch (_: InterruptedException) {
+            }
+            sendEscapeCommand(UsbCcidProtocol.SONY_CMD_TURN_ON_RF)
+            val powerResp = sendCcidCommand(
+                UsbCcidProtocol.buildIccPowerOn(slot = 0x00, seq = nextSeq(), voltageSelect = 0x00)
+            )
+            powered = powerResp != null && powerResp.commandStatus == 0
+        }
+
+        try {
+            Thread.sleep(25L)
+        } catch (_: InterruptedException) {
+        }
+
+        // カードが ISO14443-3 ACTIVE 状態に戻ったことを GetData(UID) で確認
+        val uidResp = transmitApdu(UsbCcidProtocol.buildGetUidApdu())
+        return powered || (uidResp != null && uidResp.isSuccess)
+    }
+
+    private data class SectorReadAttemptResult(
+        val sectorIndex: Int,
+        val blockIndexInSector: Int,
+        val absoluteBlock: Int,
+        val matchedCandidate: MifareKeyCandidate?,
+        val rawBlock: ByteArray?,
+        val anyKeyLoaded: Boolean,
+        val lastLoadSw: String,
+        val lastAuthSw: String,
+        val lastReadSw: String
+    )
+
+    /**
      * PC/SC Part 3 APDU で MIFARE Classic のセクター鍵候補を順にロード → 認証 → 16バイトブロック読取 → 学籍番号デコードを行う
      */
     private fun readMifareClassicOverCcid(
         cardUid: String,
         config: MifareConfig,
-        readerDisplayName: String
+        readerDisplayName: String,
+        isSonyReader: Boolean
     ): MifareReadResult {
-        val keyCandidates = config.resolveKeyCandidatesForSector(config.sectorIndex)
-        if (keyCandidates.isEmpty()) {
+        val primaryCandidates = config.resolveKeyCandidatesForSector(config.sectorIndex)
+        if (primaryCandidates.isEmpty()) {
             return MifareReadResult.Error(
                 cardUid = cardUid,
                 title = "MIFARE鍵設定エラー",
@@ -760,80 +931,96 @@ class UsbNfcReaderManager(
             )
         }
 
-        val absoluteBlock = UsbCcidProtocol.sectorToAbsoluteBlock(
-            sectorIndex = config.sectorIndex,
-            blockIndexInSector = config.blockIndexInSector
-        )
+        // 1. 優先セクターリスト（設定されたセクター番号 ＋ 一括鍵テキスト内で明示指定されたセクター番号）を順に試行
+        val prioritySectors = config.resolvePrioritySectors()
+        var firstAttemptResult: SectorReadAttemptResult? = null
+        var cardHalted = false
 
-        val keyLoadStructures = listOf(
-            Pair(0x00.toByte(), 0x00.toByte()),
-            Pair(0x20.toByte(), 0x00.toByte()),
-            Pair(0x00.toByte(), 0x01.toByte())
-        )
+        for (targetSector in prioritySectors) {
+            val candidatesForSector = config.resolveKeyCandidatesForSector(targetSector)
+            if (candidatesForSector.isEmpty()) continue
 
-        var matchedCandidate: MifareKeyCandidate? = null
-        var lastAuthSw = ""
-        var anyKeyLoaded = false
-
-        // 一括設定された鍵候補を優先順に試行
-        for ((index, candidate) in keyCandidates.withIndex()) {
-            if (index > 0) {
-                // 認証失敗後はMIFAREカードがHALT状態になるため、IccPowerOnで再アクティブ化してから次の鍵を試行
-                sendCcidCommand(UsbCcidProtocol.buildIccPowerOn(slot = 0x00, seq = nextSeq()))
+            if (cardHalted) {
+                reactivateCardOnSlot(isSonyReader = isSonyReader)
+                cardHalted = false
             }
 
-            val keyBytes = candidate.toKeyBytes()
-            var loadedSlot: Byte? = null
-            for ((structure, slot) in keyLoadStructures) {
-                val loadResp = transmitApdu(
-                    UsbCcidProtocol.buildLoadKeyApdu(
-                        keyBytes = keyBytes,
-                        keyStructure = structure,
-                        keySlot = slot
-                    )
-                )
-                if (loadResp != null && loadResp.isSuccess) {
-                    loadedSlot = slot
-                    anyKeyLoaded = true
-                    break
-                }
-                if (loadResp != null) {
-                    lastAuthSw = loadResp.statusHex
-                }
-            }
-
-            if (loadedSlot == null) continue
-
-            // セクター認証 (General Authenticate: FF 86 ... または旧式 FF 88 ...)
-            val authResp = transmitApdu(
-                UsbCcidProtocol.buildGeneralAuthenticateApdu(
-                    absoluteBlock = absoluteBlock,
-                    keyType = candidate.keyType,
-                    keySlot = loadedSlot
-                )
+            val attempt = tryAuthenticateAndReadSector(
+                sectorIndex = targetSector,
+                blockIndexInSector = config.blockIndexInSector,
+                candidates = candidatesForSector,
+                isSonyReader = isSonyReader
             )
-
-            val ok = if (authResp != null && authResp.isSuccess) {
-                true
-            } else {
-                if (authResp != null) lastAuthSw = authResp.statusHex
-                val legacyResp = transmitApdu(
-                    UsbCcidProtocol.buildLegacyAuthenticateApdu(
-                        absoluteBlock = absoluteBlock,
-                        keyType = candidate.keyType,
-                        keySlot = loadedSlot
-                    )
-                )
-                legacyResp != null && legacyResp.isSuccess
+            if (firstAttemptResult == null) {
+                firstAttemptResult = attempt
             }
 
-            if (ok) {
-                matchedCandidate = candidate
-                break
+            if (attempt.matchedCandidate != null && attempt.rawBlock != null && attempt.rawBlock.isNotEmpty()) {
+                val autoSectorNote = if (targetSector != config.sectorIndex) {
+                    " / Sector $targetSector 自動選択"
+                } else {
+                    ""
+                }
+                val readerDesc = "USB CCID ($readerDisplayName$autoSectorNote / ${attempt.matchedCandidate.summaryLabel})"
+                return buildReadResultFromBlock(
+                    cardUid = cardUid,
+                    rawBlock = attempt.rawBlock,
+                    sectorIndex = targetSector,
+                    blockIndexInSector = attempt.blockIndexInSector,
+                    absoluteBlock = attempt.absoluteBlock,
+                    readerDesc = readerDesc,
+                    config = config
+                )
+            }
+            cardHalted = true
+        }
+
+        // 2. もし設定セクターで認証失敗し、かつユーザーが工場出荷時(FFFFFFFFFFFF)以外のカスタム鍵を指定している場合、
+        //    「鍵は合っているが対象セクター番号(0〜15)の設定が異なる」ケースを救済するため全セクター(0〜15)をカスタム鍵でスキャンする
+        val allCustomCandidates = config.resolveKeyCandidatesForSector(config.sectorIndex)
+            .filter { it.keyHex != "FFFFFFFFFFFF" }
+
+        if (allCustomCandidates.isNotEmpty()) {
+            val remainingSectors = (0..15).filter { it !in prioritySectors }
+            for (scanSector in remainingSectors) {
+                reactivateCardOnSlot(isSonyReader = isSonyReader)
+                val scanAttempt = tryAuthenticateAndReadSector(
+                    sectorIndex = scanSector,
+                    blockIndexInSector = config.blockIndexInSector.coerceIn(0, 2),
+                    candidates = allCustomCandidates,
+                    isSonyReader = isSonyReader,
+                    fastSingleSlotMode = true
+                )
+                if (scanAttempt.matchedCandidate != null && scanAttempt.rawBlock != null && scanAttempt.rawBlock.isNotEmpty()) {
+                    val readerDesc =
+                        "USB CCID ($readerDisplayName / Sector $scanSector 自動検出 / ${scanAttempt.matchedCandidate.summaryLabel})"
+                    return buildReadResultFromBlock(
+                        cardUid = cardUid,
+                        rawBlock = scanAttempt.rawBlock,
+                        sectorIndex = scanSector,
+                        blockIndexInSector = scanAttempt.blockIndexInSector,
+                        absoluteBlock = scanAttempt.absoluteBlock,
+                        readerDesc = readerDesc,
+                        config = config
+                    )
+                }
             }
         }
 
-        if (!anyKeyLoaded) {
+        // 3. すべて失敗した場合のエラー・フォールバック処理
+        val refAttempt = firstAttemptResult ?: SectorReadAttemptResult(
+            sectorIndex = config.sectorIndex,
+            blockIndexInSector = config.blockIndexInSector,
+            absoluteBlock = UsbCcidProtocol.sectorToAbsoluteBlock(config.sectorIndex, config.blockIndexInSector),
+            matchedCandidate = null,
+            rawBlock = null,
+            anyKeyLoaded = false,
+            lastLoadSw = "",
+            lastAuthSw = "",
+            lastReadSw = ""
+        )
+
+        if (!refAttempt.anyKeyLoaded) {
             if (config.allowUidFallback) {
                 val dummyBlock = MifareClassicReader.createSimulatedBlock(cardUid)
                 return MifareReadResult.Success(
@@ -842,19 +1029,20 @@ class UsbNfcReaderManager(
                     rawBlockBytes = dummyBlock,
                     sectorIndex = config.sectorIndex,
                     blockIndexInSector = config.blockIndexInSector,
-                    absoluteBlockIndex = absoluteBlock,
+                    absoluteBlockIndex = refAttempt.absoluteBlock,
                     cardTypeDescription = "USBリーダー ($readerDisplayName) UIDフォールバック",
                     isUidFallback = true
                 )
             }
+            val swText = refAttempt.lastLoadSw.ifEmpty { "応答なし" }
             return MifareReadResult.Error(
                 cardUid = cardUid,
                 title = "USBリーダー鍵ロードエラー",
-                message = "USB NFCリーダー ($readerDisplayName) へのMIFARE鍵ロードコマンド (FF 82) が失敗しました (SW=$lastAuthSw)。"
+                message = "USB NFCリーダー ($readerDisplayName) へのMIFARE鍵ロードコマンド (FF 82) が失敗しました (SW=$swText)。カードをリーダー中央にしっかり置いて再度お試しください。"
             )
         }
 
-        if (matchedCandidate == null) {
+        if (refAttempt.matchedCandidate == null) {
             if (config.allowUidFallback) {
                 val dummyBlock = MifareClassicReader.createSimulatedBlock(cardUid)
                 return MifareReadResult.Success(
@@ -863,48 +1051,220 @@ class UsbNfcReaderManager(
                     rawBlockBytes = dummyBlock,
                     sectorIndex = config.sectorIndex,
                     blockIndexInSector = config.blockIndexInSector,
-                    absoluteBlockIndex = absoluteBlock,
+                    absoluteBlockIndex = refAttempt.absoluteBlock,
                     cardTypeDescription = "USBリーダー ($readerDisplayName) UIDフォールバック",
                     isUidFallback = true
                 )
             }
-            val swInfo = lastAuthSw.ifEmpty { "認証失敗" }
+            val swInfo = refAttempt.lastAuthSw.ifEmpty { "認証失敗" }
+            val triedSummary = primaryCandidates.joinToString(", ") { "${it.keyType.displayName}:${it.keyHex}" }
+            val scannedNote = if (allCustomCandidates.isNotEmpty()) "（全セクター 0〜15 の自動探索でも一致しませんでした）" else ""
             return MifareReadResult.AuthFailed(
                 cardUid = cardUid,
                 sectorIndex = config.sectorIndex,
-                keyType = keyCandidates.first().keyType,
-                message = "USBリーダーでセクター ${config.sectorIndex} (Block #$absoluteBlock) に対し、指定された計 ${keyCandidates.size} 通りの鍵候補すべてで認証に失敗しました (SW=$swInfo)。"
+                keyType = primaryCandidates.first().keyType,
+                message = "USBリーダー ($readerDisplayName) で Sector ${config.sectorIndex} (Block #${refAttempt.absoluteBlock}) に対し、指定された鍵 [$triedSummary] で認証に失敗しました (SW=$swInfo)$scannedNote。鍵設定を編集した場合は「設定を保存」を押しているか、Key A/B・鍵HEX値をご確認ください。"
             )
         }
 
-        // Step C: 16バイトデータブロックの読み取り (Read Binary: FF B0 00 <Block> 10)
-        val readResp = transmitApdu(
-            UsbCcidProtocol.buildReadBinaryBlockApdu(
-                absoluteBlock = absoluteBlock,
-                length = 16
-            )
+        val readSw = refAttempt.lastReadSw.ifEmpty { "応答なし" }
+        return MifareReadResult.Error(
+            cardUid = cardUid,
+            title = "USBリーダー ブロック読み取り失敗",
+            message = "Sector ${refAttempt.sectorIndex} の認証は成功しましたが、Block #${refAttempt.absoluteBlock} の16バイト読み取り (FF B0) に失敗しました (SW=$readSw)。"
+        )
+    }
+
+    /**
+     * 指定された1つのセクターに対して鍵候補リストを順に試行し、認証と16バイトブロック読み取りを行う。
+     * 1回でも認証(FF 86 / FF 88)に失敗するとMIFARE ClassicカードはHALT状態になるため、
+     * 次の試行の前に必ず reactivateCardOnSlot() でRF再起動（IccPowerOff -> IccPowerOn）を実行する。
+     */
+    private fun tryAuthenticateAndReadSector(
+        sectorIndex: Int,
+        blockIndexInSector: Int,
+        candidates: List<MifareKeyCandidate>,
+        isSonyReader: Boolean,
+        fastSingleSlotMode: Boolean = false
+    ): SectorReadAttemptResult {
+        val absoluteBlock = UsbCcidProtocol.sectorToAbsoluteBlock(
+            sectorIndex = sectorIndex,
+            blockIndexInSector = blockIndexInSector
         )
 
-        if (readResp == null || !readResp.isSuccess || readResp.data.isEmpty()) {
-            val swInfo = readResp?.statusHex ?: "応答なし"
-            return MifareReadResult.Error(
-                cardUid = cardUid,
-                title = "USBリーダー ブロック読み取り失敗",
-                message = "セクター認証は成功しましたが、Block #$absoluteBlock の16バイト読み取り (FF B0) に失敗しました (SW=$swInfo)。"
-            )
+        var anyKeyLoaded = false
+        var lastLoadSw = ""
+        var lastAuthSw = ""
+        var lastReadSw = ""
+        var cardNeedsReactivation = false
+
+        for ((candIdx, candidate) in candidates.withIndex()) {
+            val keyBytes = candidate.toKeyBytes()
+            val keyTypeSlot: Byte = if (candidate.keyType == MifareKeyType.KEY_A) 0x60 else 0x61
+
+            // RC-S300 および PC/SC 2.01 リーダー各種の Load Keys (FF 82 P1 P2 06 <Key>) パラメータ候補
+            // 初回候補では P1=0x00(標準揮発スロット0) と P1=0x20(PC/SC Part3 揮発フラグ) 等を網羅的に確認
+            val loadConfigs = if (fastSingleSlotMode || candIdx > 0) {
+                listOf(
+                    Pair(0x00.toByte(), 0x00.toByte()),
+                    Pair(0x20.toByte(), 0x00.toByte())
+                )
+            } else {
+                listOf(
+                    Pair(0x00.toByte(), 0x00.toByte()),
+                    Pair(0x20.toByte(), 0x00.toByte()),
+                    Pair(0x00.toByte(), 0x01.toByte()),
+                    Pair(0x00.toByte(), keyTypeSlot)
+                )
+            }
+
+            var authSucceeded = false
+            var triedAtLeastOneAuthForThisCandidate = false
+
+            for ((p1Structure, p2Slot) in loadConfigs) {
+                if (cardNeedsReactivation) {
+                    reactivateCardOnSlot(isSonyReader = isSonyReader)
+                    cardNeedsReactivation = false
+                }
+
+                // Step A: Load Keys (FF 82 <P1> <P2> 06 <6-byte Key>)
+                val loadResp = transmitApdu(
+                    UsbCcidProtocol.buildLoadKeyApdu(
+                        keyBytes = keyBytes,
+                        keyStructure = p1Structure,
+                        keySlot = p2Slot
+                    )
+                )
+
+                if (loadResp == null || !loadResp.isSuccess) {
+                    if (loadResp != null) {
+                        lastLoadSw = loadResp.statusHex
+                    }
+                    continue
+                }
+
+                anyKeyLoaded = true
+
+                // Step B: General Authenticate (FF 86 00 00 05 01 00 <Block> <KeyType> <KeySlot>)
+                val authResp = transmitApdu(
+                    UsbCcidProtocol.buildGeneralAuthenticateApdu(
+                        absoluteBlock = absoluteBlock,
+                        keyType = candidate.keyType,
+                        keySlot = p2Slot
+                    )
+                )
+
+                if (authResp != null && authResp.isSuccess) {
+                    authSucceeded = true
+                    break
+                }
+
+                // 認証失敗 → MIFARE Classic カードは HALT 状態に遷移したため次回試行前にRF再起動が必須
+                cardNeedsReactivation = true
+                if (authResp != null) {
+                    lastAuthSw = authResp.statusHex
+                }
+
+                // もし FF 86 自体が未サポート (6A81 / 6D00 等) のリーダーだった場合のみ、RF再起動後に旧式 FF 88 を試行
+                val sw1 = authResp?.sw1 ?: 0
+                if (sw1 == 0x6A || sw1 == 0x6D || sw1 == 0x6E) {
+                    reactivateCardOnSlot(isSonyReader = isSonyReader)
+                    cardNeedsReactivation = false
+                    transmitApdu(
+                        UsbCcidProtocol.buildLoadKeyApdu(
+                            keyBytes = keyBytes,
+                            keyStructure = p1Structure,
+                            keySlot = p2Slot
+                        )
+                    )
+                    val legacyResp = transmitApdu(
+                        UsbCcidProtocol.buildLegacyAuthenticateApdu(
+                            absoluteBlock = absoluteBlock,
+                            keyType = candidate.keyType,
+                            keySlot = p2Slot
+                        )
+                    )
+                    if (legacyResp != null && legacyResp.isSuccess) {
+                        authSucceeded = true
+                        break
+                    }
+                    cardNeedsReactivation = true
+                }
+
+                // (0x00, 0x00) で FF 82 が 9000 かつ FF 86 が 6300/6982 (純粋な鍵不一致) の場合、
+                // 初回候補だけ念のため (0x20, 0x00) も確認し、それ以降は同一鍵での別スロット試行を省略して高速化する
+                if (triedAtLeastOneAuthForThisCandidate && (authResp?.statusHex == "6300" || authResp?.statusHex == "6982")) {
+                    break
+                }
+                triedAtLeastOneAuthForThisCandidate = true
+            }
+
+            if (authSucceeded) {
+                // Step C: Read Binary (FF B0 00 <Block> 10)
+                var readResp = transmitApdu(
+                    UsbCcidProtocol.buildReadBinaryBlockApdu(
+                        absoluteBlock = absoluteBlock,
+                        length = 16
+                    )
+                )
+                // 6C xx (Le長エラー) が返った場合は要求長に合わせて再取得
+                if (readResp != null && readResp.sw1 == 0x6C && readResp.sw2 > 0) {
+                    readResp = transmitApdu(
+                        UsbCcidProtocol.buildReadBinaryBlockApdu(
+                            absoluteBlock = absoluteBlock,
+                            length = readResp.sw2
+                        )
+                    )
+                }
+
+                if (readResp != null && readResp.isSuccess && readResp.data.isNotEmpty()) {
+                    return SectorReadAttemptResult(
+                        sectorIndex = sectorIndex,
+                        blockIndexInSector = blockIndexInSector,
+                        absoluteBlock = absoluteBlock,
+                        matchedCandidate = candidate,
+                        rawBlock = readResp.data,
+                        anyKeyLoaded = true,
+                        lastLoadSw = lastLoadSw,
+                        lastAuthSw = "9000",
+                        lastReadSw = "9000"
+                    )
+                } else {
+                    lastReadSw = readResp?.statusHex ?: "応答なし"
+                    cardNeedsReactivation = true
+                }
+            }
         }
 
-        val rawBlock = readResp.data
-        val readerDesc = "USB CCID ($readerDisplayName / ${matchedCandidate.summaryLabel})"
+        return SectorReadAttemptResult(
+            sectorIndex = sectorIndex,
+            blockIndexInSector = blockIndexInSector,
+            absoluteBlock = absoluteBlock,
+            matchedCandidate = null,
+            rawBlock = null,
+            anyKeyLoaded = anyKeyLoaded,
+            lastLoadSw = lastLoadSw,
+            lastAuthSw = lastAuthSw,
+            lastReadSw = lastReadSw
+        )
+    }
 
-        // Step D: 読み取った16バイトブロックから学籍番号をデコード
+    private fun buildReadResultFromBlock(
+        cardUid: String,
+        rawBlock: ByteArray,
+        sectorIndex: Int,
+        blockIndexInSector: Int,
+        absoluteBlock: Int,
+        readerDesc: String,
+        config: MifareConfig
+    ): MifareReadResult {
         return when (val outcome = MifareClassicReader.extractStudentIdFromBlock(rawBlock, config)) {
             is MifareClassicReader.BlockParseOutcome.Valid -> MifareReadResult.Success(
                 cardUid = cardUid,
                 studentId = outcome.studentId,
                 rawBlockBytes = rawBlock,
-                sectorIndex = config.sectorIndex,
-                blockIndexInSector = config.blockIndexInSector,
+                sectorIndex = sectorIndex,
+                blockIndexInSector = blockIndexInSector,
                 absoluteBlockIndex = absoluteBlock,
                 cardTypeDescription = readerDesc
             )
@@ -912,8 +1272,8 @@ class UsbNfcReaderManager(
             is MifareClassicReader.BlockParseOutcome.Invalid -> MifareReadResult.ParseFailed(
                 cardUid = cardUid,
                 rawBlockBytes = rawBlock,
-                sectorIndex = config.sectorIndex,
-                blockIndexInSector = config.blockIndexInSector,
+                sectorIndex = sectorIndex,
+                blockIndexInSector = blockIndexInSector,
                 absoluteBlockIndex = absoluteBlock,
                 reason = outcome.reason
             )
@@ -935,7 +1295,34 @@ class UsbNfcReaderManager(
     }
 
     /**
-     * CCIDフレームをBulk-OUTで送信し、Bulk-INからCCIDレスポンスフレームを受信する（Time Extension 応答にも対応）
+     * PC_to_RDR_Escape (0x6B) でリーダー制御コマンドを送信する（Sony RC-S300 用）
+     */
+    private fun sendEscapeCommand(payload: ByteArray): UsbCcidProtocol.CcidResponse? {
+        val frame = UsbCcidProtocol.buildEscapeBlock(
+            slot = 0x00,
+            seq = nextSeq(),
+            payload = payload
+        )
+        return sendCcidCommand(frame)
+    }
+
+    /**
+     * Bulk-IN エンドポイント内に残っている古い未読パケット（非同期スロット通知や遅延応答）を破棄する
+     */
+    @Synchronized
+    private fun drainStaleBulkIn() {
+        val conn = activeConnection ?: return
+        val epIn = bulkInEndpoint ?: return
+        val flushBuf = ByteArray(1024)
+        repeat(4) {
+            val r = conn.bulkTransfer(epIn, flushBuf, flushBuf.size, 15)
+            if (r <= 0) return
+        }
+    }
+
+    /**
+     * CCIDフレームをBulk-OUTで送信し、Bulk-INから送信時と同一シーケンス番号(bSeq)のCCIDレスポンスフレームを受信する。
+     * Time Extension (commandStatus == 2) および古い残留パケットのスキップに対応。
      */
     @Synchronized
     private fun sendCcidCommand(frame: ByteArray): UsbCcidProtocol.CcidResponse? {
@@ -943,16 +1330,22 @@ class UsbNfcReaderManager(
         val epOut = bulkOutEndpoint ?: return null
         val epIn = bulkInEndpoint ?: return null
 
+        val expectedSeq = frame[6]
         val sent = conn.bulkTransfer(epOut, frame, frame.size, USB_TIMEOUT_MS)
         if (sent < 0) return null
 
-        // Time Extension (commandStatus == 2) が返された場合は再度Bulk-INを読み取る
-        repeat(6) {
+        repeat(8) {
             val rawResp = readFullCcidPacket(conn, epIn) ?: return null
             val parsed = UsbCcidProtocol.parseCcidResponse(rawResp) ?: return null
-            if (parsed.commandStatus != 2) {
-                return parsed
+            // Time Extension (commandStatus == 2) の場合はリーダーの処理完了を継続待機
+            if (parsed.commandStatus == 2) {
+                return@repeat
             }
+            // 前回のコマンドの遅延応答やSlotChange通知など、シーケンス番号が異なるフレームは読み飛ばす
+            if (parsed.seq != expectedSeq && parsed.messageType != UsbCcidProtocol.MSG_RDR_TO_PC_SLOT_STATUS) {
+                return@repeat
+            }
+            return parsed
         }
         return null
     }
@@ -961,7 +1354,8 @@ class UsbNfcReaderManager(
         conn: UsbDeviceConnection,
         epIn: UsbEndpoint
     ): ByteArray? {
-        val buffer = ByteArray(1024)
+        // Android + Sony RC-S300 では分割受信を避けるため十分な大きさ(4096B)のバッファで一括受信する
+        val buffer = ByteArray(4096)
         val firstRead = conn.bulkTransfer(epIn, buffer, buffer.size, USB_TIMEOUT_MS)
         if (firstRead < 10) return null
 

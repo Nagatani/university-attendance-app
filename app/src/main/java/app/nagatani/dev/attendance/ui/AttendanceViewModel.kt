@@ -96,6 +96,21 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
     val mifareConfig: StateFlow<MifareConfig> = settingsRepo.mifareConfig
     val exportConfig: StateFlow<ExportConfig> = settingsRepo.exportConfig
 
+    // MIFARE設定画面で編集中（未保存）のドラフト設定（設定画面でのリアルタイム診断・USB読取に即時反映）
+    private val _liveDraftMifareConfig = MutableStateFlow<MifareConfig?>(null)
+
+    fun updateLiveDraftMifareConfig(draft: MifareConfig?) {
+        _liveDraftMifareConfig.value = draft
+    }
+
+    private fun getEffectiveMifareConfig(): MifareConfig {
+        return if (_currentTab.value == AppTab.MIFARE_SETTINGS) {
+            _liveDraftMifareConfig.value ?: mifareConfig.value
+        } else {
+            mifareConfig.value
+        }
+    }
+
     // 講義一覧
     val courses: StateFlow<List<CourseEntity>> = dao.observeAllCourses()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -140,9 +155,10 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
     private val _statusMessage = MutableStateFlow<String?>(null)
     val statusMessage: StateFlow<String?> = _statusMessage.asStateFlow()
 
-    // 連続タッチチャタリング防止用（同一UIDの1.8秒以内の再検知を無視）
+    // 連続タッチチャタリング防止用（同一UIDの1.8秒以内の再検知を無視。ただし前回失敗→今回成功の場合は無視しない）
     private var lastScannedUid: String = ""
     private var lastScanEpochMillis: Long = 0L
+    private var lastScanWasSuccess: Boolean = false
     private var bannerResetJob: Job? = null
 
     // SAFファイル保存ダイアログ待機中の一時データ保持
@@ -151,7 +167,7 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
     // 外付けUSB NFCリーダー (CCID / PC/SC) 管理マネージャ
     private val usbReaderManager = UsbNfcReaderManager(
         context = application,
-        configProvider = { mifareConfig.value },
+        configProvider = { getEffectiveMifareConfig() },
         onCardReadResult = { result ->
             viewModelScope.launch(Dispatchers.IO) {
                 handleMifareReadResult(result, sourceLabel = "NFC(USB)")
@@ -344,7 +360,7 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
      */
     fun onNfcTagDiscovered(tag: Tag) {
         viewModelScope.launch(Dispatchers.IO) {
-            val config = mifareConfig.value
+            val config = getEffectiveMifareConfig()
             val result = MifareClassicReader.readStudentCard(tag, config)
             handleMifareReadResult(result, sourceLabel = "NFC(本体)")
         }
@@ -355,7 +371,7 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
      */
     fun simulateCardTap(simulatedStudentId: String = "24B10234") {
         viewModelScope.launch(Dispatchers.IO) {
-            val config = mifareConfig.value
+            val config = getEffectiveMifareConfig()
             val rawBlock = MifareClassicReader.createSimulatedBlock(
                 studentIdText = simulatedStudentId,
                 offset = config.byteOffset
@@ -392,15 +408,20 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
         _lastDiagnosticResult.value = result
 
         val now = System.currentTimeMillis()
+        val isSuccess = result is MifareReadResult.Success
         // 同一カードがかざされっぱなしの場合のチャタリング防止（1.8秒以内）
-        if (result.cardUid.isNotEmpty() &&
+        // ※ただし前回が失敗で今回リトライ成功した場合や、MIFARE設定画面での診断時はスキップしない
+        if (_currentTab.value != AppTab.MIFARE_SETTINGS &&
+            result.cardUid.isNotEmpty() &&
             result.cardUid == lastScannedUid &&
-            (now - lastScanEpochMillis) < 1800L
+            (now - lastScanEpochMillis) < 1800L &&
+            !(isSuccess && !lastScanWasSuccess)
         ) {
             return
         }
         lastScannedUid = result.cardUid
         lastScanEpochMillis = now
+        lastScanWasSuccess = isSuccess
 
         val soundEnabled = exportConfig.value.soundEnabled
 

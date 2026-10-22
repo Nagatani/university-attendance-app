@@ -48,6 +48,8 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -84,6 +86,7 @@ fun MifareSettingsScreen(
     onConnectUsbDevice: (String) -> Unit,
     onDisconnectUsbReader: () -> Unit,
     onSaveConfig: (MifareConfig) -> Unit,
+    onDraftConfigChanged: (MifareConfig?) -> Unit = {},
     onSimulateDiagnosticCard: (sampleStudentId: String) -> Unit
 ) {
     val clipboardManager = LocalClipboardManager.current
@@ -140,6 +143,19 @@ fun MifareSettingsScreen(
         draftConfig.resolveKeyCandidatesForSector(draftConfig.sectorIndex)
     }
     val isKeyValid = activeCandidatesForSector.isNotEmpty() && parseSummary.errors.isEmpty()
+
+    // 設定画面で入力中の鍵・セクターを「保存ボタンを押す前」でも即座にUSB/本体NFC診断へ反映
+    LaunchedEffect(draftConfig, isKeyValid) {
+        if (isKeyValid) {
+            onDraftConfigChanged(draftConfig)
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            onDraftConfigChanged(null)
+        }
+    }
 
     Row(
         modifier = Modifier

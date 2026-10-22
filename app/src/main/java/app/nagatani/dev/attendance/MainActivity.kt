@@ -521,6 +521,7 @@ fun UniversityAttendanceTabletApp(
                                     onConnectUsbDevice = { viewModel.connectUsbDevice(it) },
                                     onDisconnectUsbReader = { viewModel.disconnectUsbReader() },
                                     onSaveConfig = { viewModel.saveMifareConfig(it) },
+                                    onDraftConfigChanged = { viewModel.updateLiveDraftMifareConfig(it) },
                                     onSimulateDiagnosticCard = { sampleId ->
                                         viewModel.simulateCardTap(sampleId)
                                     }

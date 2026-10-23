@@ -15,6 +15,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -31,6 +33,8 @@ import androidx.compose.material.icons.filled.Nfc
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Scaffold
@@ -48,8 +52,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.nagatani.dev.attendance.ui.AppTab
 import app.nagatani.dev.attendance.ui.AttendanceViewModel
@@ -166,12 +172,18 @@ class MainActivity : ComponentActivity(), NfcAdapter.ReaderCallback {
         val adapter = nfcAdapter
         isNfcEnabledState = adapter?.isEnabled == true
         if (adapter != null && adapter.isEnabled) {
+            // FLAG_READER_SKIP_NDEF_CHECK を指定することで、OS標準のNDEFレコード探索（約150〜300ms）をスキップし
+            // カード検知から onTagDiscovered 呼び出しまでの遅延を最小化する
             val flags = NfcAdapter.FLAG_READER_NFC_A or
                 NfcAdapter.FLAG_READER_NFC_B or
                 NfcAdapter.FLAG_READER_NFC_F or
                 NfcAdapter.FLAG_READER_NFC_V or
+                NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK or
                 NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS
-            adapter.enableReaderMode(this, this, flags, null)
+            val options = Bundle().apply {
+                putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 120)
+            }
+            adapter.enableReaderMode(this, this, flags, options)
         }
         viewModel.scanUsbReaders()
     }
@@ -215,6 +227,7 @@ class MainActivity : ComponentActivity(), NfcAdapter.ReaderCallback {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun UniversityAttendanceTabletApp(
     viewModel: AttendanceViewModel,
@@ -225,6 +238,10 @@ fun UniversityAttendanceTabletApp(
     onLaunchCreateDocument: (String) -> Unit
 ) {
     val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    // 画面幅 720dp 未満（スマートフォン縦向き・小型画面）の場合はスマホ最適化レイアウトへ自動切替
+    val isCompact = configuration.screenWidthDp < 720
+
     val currentTab by viewModel.currentTab.collectAsState()
     val courses by viewModel.courses.collectAsState()
     val selectedCourseId by viewModel.selectedCourseId.collectAsState()
@@ -253,10 +270,163 @@ fun UniversityAttendanceTabletApp(
     val selectedCourse = courses.find { it.id == selectedCourseId }
     val selectedSession = sessions.find { it.session.id == selectedSessionId }?.session
 
+    // 外付けUSB NFCリーダーステータスピル表示内容
+    val (usbBadgeColor, usbBadgeText) = when (val st = usbReaderState) {
+        is UsbReaderState.Connected -> Color(0xFF059669) to (if (isCompact) "USB: ${st.deviceName}" else "USBリーダー: ${st.deviceName}")
+        is UsbReaderState.PermissionRequired -> Color(0xFFD97706) to "USB: 権限待ち"
+        is UsbReaderState.Error -> Color(0xFFDC2626) to (if (isCompact) "USB: エラー(再検索)" else "USBリーダー: エラー(タップで再検索)")
+        is UsbReaderState.Disconnected -> Color(0xFF475569) to (if (isCompact) "USB: 未接続(再検索)" else "USBリーダー: 未接続(タップで再検索)")
+    }
+
+    // 本体NFCステータス表示ピル表示内容
+    val nfcBadgeColor = when {
+        !isNfcAvailable -> Color(0xFF64748B)
+        !isNfcEnabled -> Color(0xFFD97706)
+        else -> Color(0xFF0284C7)
+    }
+    val nfcBadgeText = when {
+        !isNfcAvailable -> "本体NFC: 非搭載"
+        !isNfcEnabled -> "本体NFC: OFF"
+        else -> "本体NFC: 待機中"
+    }
+
+    @Composable
+    fun MainTabContent() {
+        when (currentTab) {
+            AppTab.COURSE_MANAGEMENT -> {
+                CourseManagementScreen(
+                    isCompact = isCompact,
+                    courses = courses,
+                    selectedCourseId = selectedCourseId,
+                    sessions = sessions,
+                    selectedSessionId = selectedSessionId,
+                    attendanceRecords = sessionAttendance,
+                    onSelectCourse = { viewModel.selectCourse(it) },
+                    onSelectSession = { viewModel.selectSession(it) },
+                    onCreateCourse = { code, name, instructor, room, auto15 ->
+                        viewModel.createCourse(code, name, instructor, room, auto15)
+                    },
+                    onDeleteCourse = { viewModel.deleteCourse(it) },
+                    onCreateSession = { cId, sNum, title, date ->
+                        viewModel.createSession(cId, sNum, title, date)
+                    },
+                    onGenerate15Sessions = { viewModel.generateRemaining15Sessions(it) },
+                    onStartAttendanceKiosk = { cId, sId ->
+                        viewModel.startAttendanceKiosk(cId, sId)
+                    },
+                    onRegisterManualAttendance = { studentId, note ->
+                        viewModel.registerManualAttendance(studentId, note)
+                    },
+                    onDeleteAttendance = { viewModel.deleteAttendanceRecord(it) },
+                    onExportSessionToDefaultFolder = { sId, cCode, sNum ->
+                        val scope = ExportScope.SingleSession(sId, cCode, sNum)
+                        viewModel.exportToDesignatedFolder(
+                            context = context,
+                            scope = scope,
+                            onNeedDirectorySelection = {
+                                onRequestDefaultFolderThenExport(scope)
+                            }
+                        )
+                    },
+                    onExportSessionViaFilePicker = { sId, cCode, sNum ->
+                        val scope = ExportScope.SingleSession(sId, cCode, sNum)
+                        viewModel.prepareFilePickerExport(scope, onLaunchCreateDocument)
+                    },
+                    onShareSessionCsv = { sId, cCode, sNum ->
+                        val scope = ExportScope.SingleSession(sId, cCode, sNum)
+                        viewModel.shareCsv(context, scope)
+                    }
+                )
+            }
+
+            AppTab.EXPORT_HISTORY -> {
+                ExportAndHistoryScreen(
+                    isCompact = isCompact,
+                    allRows = allExportRows,
+                    courses = courses,
+                    exportConfig = exportConfig,
+                    onUpdateExportConfig = { viewModel.saveExportConfig(it) },
+                    onPickDefaultDirectory = onPickDefaultFolder,
+                    onExportToDefaultFolder = { scope ->
+                        viewModel.exportToDesignatedFolder(
+                            context = context,
+                            scope = scope,
+                            onNeedDirectorySelection = {
+                                onRequestDefaultFolderThenExport(scope)
+                            }
+                        )
+                    },
+                    onExportViaFilePicker = { scope ->
+                        viewModel.prepareFilePickerExport(scope, onLaunchCreateDocument)
+                    },
+                    onShareCsv = { scope ->
+                        viewModel.shareCsv(context, scope)
+                    },
+                    onDeleteRecordById = { recId, stuId ->
+                        viewModel.deleteAttendanceRecordById(recId, stuId)
+                    }
+                )
+            }
+
+            AppTab.MIFARE_SETTINGS -> {
+                MifareSettingsScreen(
+                    isCompact = isCompact,
+                    currentConfig = mifareConfig,
+                    lastDiagnosticResult = lastDiagnosticResult,
+                    usbReaderState = usbReaderState,
+                    detectedUsbDevices = detectedUsbDevices,
+                    onScanUsbReaders = { viewModel.scanUsbReaders() },
+                    onConnectUsbDevice = { viewModel.connectUsbDevice(it) },
+                    onDisconnectUsbReader = { viewModel.disconnectUsbReader() },
+                    onSaveConfig = { viewModel.saveMifareConfig(it) },
+                    onDraftConfigChanged = { viewModel.updateLiveDraftMifareConfig(it) },
+                    onSimulateDiagnosticCard = { sampleId ->
+                        viewModel.simulateCardTap(sampleId)
+                    }
+                )
+            }
+
+            AppTab.ATTENDANCE_KIOSK -> {
+                // 上部if分岐で処理済み
+            }
+        }
+    }
+
     Scaffold(
-        snackbarHost = { SnackbarHost(hostState = snackbarHostState) }
+        snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
+        bottomBar = {
+            // スマートフォン画面（かつキオスク全画面モード以外のとき）は下部に NavigationBar を表示
+            if (isCompact && currentTab != AppTab.ATTENDANCE_KIOSK) {
+                NavigationBar {
+                    NavigationBarItem(
+                        selected = currentTab == AppTab.COURSE_MANAGEMENT,
+                        onClick = { viewModel.selectTab(AppTab.COURSE_MANAGEMENT) },
+                        icon = { Icon(Icons.Default.School, contentDescription = null) },
+                        label = { Text("講義・回", maxLines = 1) }
+                    )
+                    NavigationBarItem(
+                        selected = currentTab == AppTab.ATTENDANCE_KIOSK,
+                        onClick = { viewModel.selectTab(AppTab.ATTENDANCE_KIOSK) },
+                        icon = { Icon(Icons.Default.Nfc, contentDescription = null) },
+                        label = { Text("出席受付", maxLines = 1) }
+                    )
+                    NavigationBarItem(
+                        selected = currentTab == AppTab.EXPORT_HISTORY,
+                        onClick = { viewModel.selectTab(AppTab.EXPORT_HISTORY) },
+                        icon = { Icon(Icons.Default.FolderSpecial, contentDescription = null) },
+                        label = { Text("CSV・履歴", maxLines = 1) }
+                    )
+                    NavigationBarItem(
+                        selected = currentTab == AppTab.MIFARE_SETTINGS,
+                        onClick = { viewModel.selectTab(AppTab.MIFARE_SETTINGS) },
+                        icon = { Icon(Icons.Default.Key, contentDescription = null) },
+                        label = { Text("鍵設定", maxLines = 1) }
+                    )
+                }
+            }
+        }
     ) { innerPadding ->
-        // 出席受付キオスク画面のときは全画面表示（サイドナビゲーションを隠して学生の誤操作を防止）
+        // 出席受付キオスク画面のときは全画面表示（ナビゲーションを隠して学生の誤操作を防止）
         if (currentTab == AppTab.ATTENDANCE_KIOSK) {
             Box(
                 modifier = Modifier
@@ -264,6 +434,7 @@ fun UniversityAttendanceTabletApp(
                     .padding(innerPadding)
             ) {
                 AttendanceKioskScreen(
+                    isCompact = isCompact,
                     selectedCourse = selectedCourse,
                     selectedSession = selectedSession,
                     attendanceRecords = sessionAttendance,
@@ -301,6 +472,94 @@ fun UniversityAttendanceTabletApp(
                         viewModel.selectTab(AppTab.COURSE_MANAGEMENT)
                     }
                 )
+            }
+        } else if (isCompact) {
+            // スマートフォン向け：コンパクト2段ヘッダー ＋ 単一カラムメインコンテンツ（下部はNavigationBar）
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .background(MaterialTheme.colorScheme.background)
+            ) {
+                Surface(
+                    color = MaterialTheme.colorScheme.primary,
+                    contentColor = Color.White,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "大学講義 出席管理",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.ExtraBold,
+                                maxLines = 1
+                            )
+                            if (selectedCourse != null && selectedSession != null) {
+                                Surface(
+                                    color = Color.White.copy(alpha = 0.18f),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Text(
+                                        text = "${selectedCourse.courseName} / 第${selectedSession.sessionNumber}回",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Surface(
+                                color = usbBadgeColor,
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier.clickable { viewModel.scanUsbReaders() }
+                            ) {
+                                Text(
+                                    text = usbBadgeText,
+                                    color = Color.White,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                )
+                            }
+
+                            Surface(
+                                color = nfcBadgeColor,
+                                shape = RoundedCornerShape(16.dp)
+                            ) {
+                                Text(
+                                    text = nfcBadgeText,
+                                    color = Color.White,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    MainTabContent()
+                }
             }
         } else {
             // タブレット向け：左サイド NavigationRail ＋ 上部ステータスバー ＋ メインコンテンツ
@@ -387,13 +646,6 @@ fun UniversityAttendanceTabletApp(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                // 外付けUSB NFCリーダーステータスピル
-                                val (usbBadgeColor, usbBadgeText) = when (val st = usbReaderState) {
-                                    is UsbReaderState.Connected -> Color(0xFF059669) to "USBリーダー: ${st.deviceName}"
-                                    is UsbReaderState.PermissionRequired -> Color(0xFFD97706) to "USBリーダー: 権限待ち"
-                                    is UsbReaderState.Error -> Color(0xFFDC2626) to "USBリーダー: エラー(タップで再検索)"
-                                    is UsbReaderState.Disconnected -> Color(0xFF475569) to "USBリーダー: 未接続(タップで再検索)"
-                                }
                                 Surface(
                                     color = usbBadgeColor,
                                     shape = RoundedCornerShape(20.dp),
@@ -408,17 +660,6 @@ fun UniversityAttendanceTabletApp(
                                     )
                                 }
 
-                                // 本体NFCステータス表示ピル
-                                val nfcBadgeColor = when {
-                                    !isNfcAvailable -> Color(0xFF64748B)
-                                    !isNfcEnabled -> Color(0xFFD97706)
-                                    else -> Color(0xFF0284C7)
-                                }
-                                val nfcBadgeText = when {
-                                    !isNfcAvailable -> "本体NFC: 非搭載"
-                                    !isNfcEnabled -> "本体NFC: OFF"
-                                    else -> "本体NFC: 待機中"
-                                }
                                 Surface(
                                     color = nfcBadgeColor,
                                     shape = RoundedCornerShape(20.dp)
@@ -437,101 +678,7 @@ fun UniversityAttendanceTabletApp(
 
                     // 各タブのメインコンテンツ
                     Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                        when (currentTab) {
-                            AppTab.COURSE_MANAGEMENT -> {
-                                CourseManagementScreen(
-                                    courses = courses,
-                                    selectedCourseId = selectedCourseId,
-                                    sessions = sessions,
-                                    selectedSessionId = selectedSessionId,
-                                    attendanceRecords = sessionAttendance,
-                                    onSelectCourse = { viewModel.selectCourse(it) },
-                                    onSelectSession = { viewModel.selectSession(it) },
-                                    onCreateCourse = { code, name, instructor, room, auto15 ->
-                                        viewModel.createCourse(code, name, instructor, room, auto15)
-                                    },
-                                    onDeleteCourse = { viewModel.deleteCourse(it) },
-                                    onCreateSession = { cId, sNum, title, date ->
-                                        viewModel.createSession(cId, sNum, title, date)
-                                    },
-                                    onGenerate15Sessions = { viewModel.generateRemaining15Sessions(it) },
-                                    onStartAttendanceKiosk = { cId, sId ->
-                                        viewModel.startAttendanceKiosk(cId, sId)
-                                    },
-                                    onRegisterManualAttendance = { studentId, note ->
-                                        viewModel.registerManualAttendance(studentId, note)
-                                    },
-                                    onDeleteAttendance = { viewModel.deleteAttendanceRecord(it) },
-                                    onExportSessionToDefaultFolder = { sId, cCode, sNum ->
-                                        val scope = ExportScope.SingleSession(sId, cCode, sNum)
-                                        viewModel.exportToDesignatedFolder(
-                                            context = context,
-                                            scope = scope,
-                                            onNeedDirectorySelection = {
-                                                onRequestDefaultFolderThenExport(scope)
-                                            }
-                                        )
-                                    },
-                                    onExportSessionViaFilePicker = { sId, cCode, sNum ->
-                                        val scope = ExportScope.SingleSession(sId, cCode, sNum)
-                                        viewModel.prepareFilePickerExport(scope, onLaunchCreateDocument)
-                                    },
-                                    onShareSessionCsv = { sId, cCode, sNum ->
-                                        val scope = ExportScope.SingleSession(sId, cCode, sNum)
-                                        viewModel.shareCsv(context, scope)
-                                    }
-                                )
-                            }
-
-                            AppTab.EXPORT_HISTORY -> {
-                                ExportAndHistoryScreen(
-                                    allRows = allExportRows,
-                                    courses = courses,
-                                    exportConfig = exportConfig,
-                                    onUpdateExportConfig = { viewModel.saveExportConfig(it) },
-                                    onPickDefaultDirectory = onPickDefaultFolder,
-                                    onExportToDefaultFolder = { scope ->
-                                        viewModel.exportToDesignatedFolder(
-                                            context = context,
-                                            scope = scope,
-                                            onNeedDirectorySelection = {
-                                                onRequestDefaultFolderThenExport(scope)
-                                            }
-                                        )
-                                    },
-                                    onExportViaFilePicker = { scope ->
-                                        viewModel.prepareFilePickerExport(scope, onLaunchCreateDocument)
-                                    },
-                                    onShareCsv = { scope ->
-                                        viewModel.shareCsv(context, scope)
-                                    },
-                                    onDeleteRecordById = { recId, stuId ->
-                                        viewModel.deleteAttendanceRecordById(recId, stuId)
-                                    }
-                                )
-                            }
-
-                            AppTab.MIFARE_SETTINGS -> {
-                                MifareSettingsScreen(
-                                    currentConfig = mifareConfig,
-                                    lastDiagnosticResult = lastDiagnosticResult,
-                                    usbReaderState = usbReaderState,
-                                    detectedUsbDevices = detectedUsbDevices,
-                                    onScanUsbReaders = { viewModel.scanUsbReaders() },
-                                    onConnectUsbDevice = { viewModel.connectUsbDevice(it) },
-                                    onDisconnectUsbReader = { viewModel.disconnectUsbReader() },
-                                    onSaveConfig = { viewModel.saveMifareConfig(it) },
-                                    onDraftConfigChanged = { viewModel.updateLiveDraftMifareConfig(it) },
-                                    onSimulateDiagnosticCard = { sampleId ->
-                                        viewModel.simulateCardTap(sampleId)
-                                    }
-                                )
-                            }
-
-                            AppTab.ATTENDANCE_KIOSK -> {
-                                // 上部if分岐で処理済み
-                            }
-                        }
+                        MainTabContent()
                     }
                 }
             }

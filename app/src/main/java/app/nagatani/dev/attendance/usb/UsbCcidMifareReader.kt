@@ -403,6 +403,27 @@ class UsbNfcReaderManager(
     private var sequenceNumber: Byte = 0
     private var isReceiverRegistered = false
 
+    // 低スペックタブレットでのGC負荷・メモリアロケーションを排除する再利用バッファ
+    private val sharedReceiveBuffer = ByteArray(4096)
+    private val sharedFlushBuffer = ByteArray(1024)
+
+    // 通信タイムアウトやbSeq不一致が発生した時のみBulk-INドレインを実行するフラグ（通常時の15msブロッキングを排除）
+    @Volatile
+    private var needsBulkInDrain: Boolean = false
+
+    // 連続80名以上のタッチを最速化するためのセッション学習キャッシュ（直近成功した電圧・セクター・鍵・FF82パラメータを1発目で試行）
+    @Volatile
+    private var lastWorkingVoltage: Byte = 0x00
+
+    @Volatile
+    private var lastWorkingSector: Int? = null
+
+    @Volatile
+    private var lastWorkingCandidate: MifareKeyCandidate? = null
+
+    @Volatile
+    private var lastWorkingLoadParams: Pair<Byte, Byte>? = null
+
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
@@ -704,11 +725,12 @@ class UsbNfcReaderManager(
                         )
                     }
                     consecutiveIoErrors = 0
-                    delay(200L)
+                    // 80名以上の連続タッチでもカード接近を即座(平均20ms)に検知できるよう40ms間隔で高速監視
+                    delay(40L)
                     continue
                 }
 
-                // 2. カードをアクティブ化してUIDを取得
+                // 2. カードをアクティブ化してUIDを取得（完了時点でカードはISO14443-3 ACTIVE状態）
                 val currentUid = activateCardAndGetUid(isSonyReader = isSonyReader)
 
                 if (currentUid.isEmpty()) {
@@ -723,16 +745,18 @@ class UsbNfcReaderManager(
                         )
                     }
                     consecutiveIoErrors = 0
-                    delay(240L)
+                    delay(45L)
                     continue
                 }
 
-                _readerState.value = UsbReaderState.Connected(
-                    deviceName = deviceName,
-                    vendorId = vendorId,
-                    productId = productId,
-                    cardPresent = true
-                )
+                if ((_readerState.value as? UsbReaderState.Connected)?.cardPresent != true) {
+                    _readerState.value = UsbReaderState.Connected(
+                        deviceName = deviceName,
+                        vendorId = vendorId,
+                        productId = productId,
+                        cardPresent = true
+                    )
+                }
                 consecutiveIoErrors = 0
 
                 val config = configProvider()
@@ -740,16 +764,11 @@ class UsbNfcReaderManager(
 
                 // 同一カードが置かれっぱなしで、かつ設定も変更されていない場合はスキップ
                 if (currentUid == lastProcessedCardUid && currentConfigSig == lastProcessedConfigSig) {
-                    delay(280L)
+                    delay(65L)
                     continue
                 }
 
-                // RC-S300はカードがアンテナ端に近づいた瞬間にUID取得のみ先行成功するため、
-                // カードが密着してRF磁界が安定するまで少し待機してからMIFARE Crypto1認証を開始する
-                delay(65L)
-                reactivateCardOnSlot(isSonyReader = isSonyReader)
-
-                // 3. MIFARE Classic セクター認証＆ブロック読み取りを実行
+                // 3. 待機やRF再起動を挟まず、activateCardAndGetUid()直後のACTIVE状態のまま即座にMIFARE認証＆読取を実行（最速パス）
                 var readResult = readMifareClassicOverCcid(
                     cardUid = currentUid,
                     config = config,
@@ -757,9 +776,9 @@ class UsbNfcReaderManager(
                     isSonyReader = isSonyReader
                 )
 
-                // かざす途中の不安定なタイミングで失敗した場合は、一度だけRF再起動して自動リトライ
+                // かざす途中の不安定なタイミングで初回のみ失敗した場合は、35ms待ってRF再起動し即リトライ
                 if (readResult is MifareReadResult.AuthFailed || readResult is MifareReadResult.Error) {
-                    delay(120L)
+                    delay(35L)
                     if (reactivateCardOnSlot(isSonyReader = isSonyReader)) {
                         readResult = readMifareClassicOverCcid(
                             cardUid = currentUid,
@@ -792,7 +811,7 @@ class UsbNfcReaderManager(
                     }
                 }
 
-                delay(350L)
+                delay(65L)
             } catch (e: Exception) {
                 consecutiveIoErrors++
                 if (consecutiveIoErrors > 15) {
@@ -801,19 +820,26 @@ class UsbNfcReaderManager(
                     )
                     break
                 }
-                delay(400L)
+                delay(150L)
             }
         }
     }
 
     /**
      * 非接触カードをIccPowerOnで起動し、PC/SC GetData (FF CA 00 00 00) でカードUIDを取得する。
-     * Sony RC-S300 で標準IccPowerOnのみではType A応答がない場合はEscapeコマンドによるType A切替も試行する。
+     * 直近成功した電圧指定（lastWorkingVoltage）を先頭で試行し、1往復で高速起動する。
      */
     private fun activateCardAndGetUid(isSonyReader: Boolean): String {
-        drainStaleBulkIn()
+        if (needsBulkInDrain) {
+            drainStaleBulkIn()
+        }
 
-        val voltages = byteArrayOf(0x00, 0x01, 0x02) // Auto, 5.0V, 3.0V
+        val preferredV = lastWorkingVoltage
+        val voltages = when (preferredV) {
+            0x01.toByte() -> byteArrayOf(0x01, 0x00, 0x02)
+            0x02.toByte() -> byteArrayOf(0x02, 0x00, 0x01)
+            else -> byteArrayOf(0x00, 0x01, 0x02)
+        }
         var powerOnSuccess = false
         for (v in voltages) {
             val resp = sendCcidCommand(
@@ -821,6 +847,7 @@ class UsbNfcReaderManager(
             )
             if (resp != null && resp.commandStatus == 0 && resp.payload.isNotEmpty()) {
                 powerOnSuccess = true
+                lastWorkingVoltage = v
                 break
             }
         }
@@ -855,18 +882,20 @@ class UsbNfcReaderManager(
 
     /**
      * MIFARE Classic 認証失敗によってHALT（非選択）状態に落ちたカードを復帰させるため、
-     * 確実に IccPowerOff (RF切断) -> 待機 -> IccPowerOn (RF再投入) -> GetUID (選択確認) を行う。
-     * ※Sony RC-S300 では IccPowerOff を挟まずに IccPowerOn のみを送ってもRF磁界がリセットされないため必須。
+     * IccPowerOff (RF切断) -> 最小待機(25ms) -> IccPowerOn (RF再投入) -> GetUID (選択確認) を行う。
      */
     private fun reactivateCardOnSlot(isSonyReader: Boolean): Boolean {
-        drainStaleBulkIn()
+        if (needsBulkInDrain) {
+            drainStaleBulkIn()
+        }
         sendCcidCommand(UsbCcidProtocol.buildIccPowerOff(slot = 0x00, seq = nextSeq()))
         try {
-            Thread.sleep(50L)
+            Thread.sleep(25L)
         } catch (_: InterruptedException) {
         }
 
-        val voltages = byteArrayOf(0x00, 0x01)
+        val preferredV = lastWorkingVoltage
+        val voltages = if (preferredV == 0x01.toByte()) byteArrayOf(0x01, 0x00) else byteArrayOf(0x00, 0x01)
         var powered = false
         for (v in voltages) {
             val powerResp = sendCcidCommand(
@@ -874,6 +903,7 @@ class UsbNfcReaderManager(
             )
             if (powerResp != null && powerResp.commandStatus == 0 && powerResp.payload.isNotEmpty()) {
                 powered = true
+                lastWorkingVoltage = v
                 break
             }
         }
@@ -881,7 +911,7 @@ class UsbNfcReaderManager(
         if (!powered && isSonyReader) {
             sendEscapeCommand(UsbCcidProtocol.SONY_CMD_TURN_OFF_RF)
             try {
-                Thread.sleep(35L)
+                Thread.sleep(25L)
             } catch (_: InterruptedException) {
             }
             sendEscapeCommand(UsbCcidProtocol.SONY_CMD_TURN_ON_RF)
@@ -892,7 +922,7 @@ class UsbNfcReaderManager(
         }
 
         try {
-            Thread.sleep(25L)
+            Thread.sleep(10L)
         } catch (_: InterruptedException) {
         }
 
@@ -931,8 +961,14 @@ class UsbNfcReaderManager(
             )
         }
 
-        // 1. 優先セクターリスト（設定されたセクター番号 ＋ 一括鍵テキスト内で明示指定されたセクター番号）を順に試行
-        val prioritySectors = config.resolvePrioritySectors()
+        // 1. 優先セクターリスト（直近成功セクターがあれば先頭に移動し、2人目以降のタッチを1発認証にする）
+        val basePrioritySectors = config.resolvePrioritySectors()
+        val cachedSec = lastWorkingSector
+        val prioritySectors = if (cachedSec != null && cachedSec in basePrioritySectors) {
+            listOf(cachedSec) + basePrioritySectors.filter { it != cachedSec }
+        } else {
+            basePrioritySectors
+        }
         var firstAttemptResult: SectorReadAttemptResult? = null
         var cardHalted = false
 
@@ -956,6 +992,8 @@ class UsbNfcReaderManager(
             }
 
             if (attempt.matchedCandidate != null && attempt.rawBlock != null && attempt.rawBlock.isNotEmpty()) {
+                lastWorkingSector = targetSector
+                lastWorkingCandidate = attempt.matchedCandidate
                 val autoSectorNote = if (targetSector != config.sectorIndex) {
                     " / Sector $targetSector 自動選択"
                 } else {
@@ -981,7 +1019,12 @@ class UsbNfcReaderManager(
             .filter { it.keyHex != "FFFFFFFFFFFF" }
 
         if (allCustomCandidates.isNotEmpty()) {
-            val remainingSectors = (0..15).filter { it !in prioritySectors }
+            val baseRemaining = (0..15).filter { it !in prioritySectors }
+            val remainingSectors = if (cachedSec != null && cachedSec in baseRemaining) {
+                listOf(cachedSec) + baseRemaining.filter { it != cachedSec }
+            } else {
+                baseRemaining
+            }
             for (scanSector in remainingSectors) {
                 reactivateCardOnSlot(isSonyReader = isSonyReader)
                 val scanAttempt = tryAuthenticateAndReadSector(
@@ -992,6 +1035,8 @@ class UsbNfcReaderManager(
                     fastSingleSlotMode = true
                 )
                 if (scanAttempt.matchedCandidate != null && scanAttempt.rawBlock != null && scanAttempt.rawBlock.isNotEmpty()) {
+                    lastWorkingSector = scanSector
+                    lastWorkingCandidate = scanAttempt.matchedCandidate
                     val readerDesc =
                         "USB CCID ($readerDisplayName / Sector $scanSector 自動検出 / ${scanAttempt.matchedCandidate.summaryLabel})"
                     return buildReadResultFromBlock(
@@ -1098,13 +1143,22 @@ class UsbNfcReaderManager(
         var lastReadSw = ""
         var cardNeedsReactivation = false
 
-        for ((candIdx, candidate) in candidates.withIndex()) {
+        // 直近のカードで認証成功した鍵候補があればリストの先頭に移動し、1発目で認証を通す
+        val cachedCand = lastWorkingCandidate
+        val orderedCandidates = if (cachedCand != null && candidates.any { it.keyType == cachedCand.keyType && it.keyHex == cachedCand.keyHex }) {
+            val prioritized = candidates.first { it.keyType == cachedCand.keyType && it.keyHex == cachedCand.keyHex }
+            listOf(prioritized) + candidates.filterNot { it.keyType == cachedCand.keyType && it.keyHex == cachedCand.keyHex }
+        } else {
+            candidates
+        }
+
+        for ((candIdx, candidate) in orderedCandidates.withIndex()) {
             val keyBytes = candidate.toKeyBytes()
             val keyTypeSlot: Byte = if (candidate.keyType == MifareKeyType.KEY_A) 0x60 else 0x61
 
             // RC-S300 および PC/SC 2.01 リーダー各種の Load Keys (FF 82 P1 P2 06 <Key>) パラメータ候補
-            // 初回候補では P1=0x00(標準揮発スロット0) と P1=0x20(PC/SC Part3 揮発フラグ) 等を網羅的に確認
-            val loadConfigs = if (fastSingleSlotMode || candIdx > 0) {
+            // 直近成功した (P1, P2) があれば最優先にする
+            val baseLoadConfigs = if (fastSingleSlotMode || candIdx > 0) {
                 listOf(
                     Pair(0x00.toByte(), 0x00.toByte()),
                     Pair(0x20.toByte(), 0x00.toByte())
@@ -1116,6 +1170,12 @@ class UsbNfcReaderManager(
                     Pair(0x00.toByte(), 0x01.toByte()),
                     Pair(0x00.toByte(), keyTypeSlot)
                 )
+            }
+            val cachedLoad = lastWorkingLoadParams
+            val loadConfigs = if (cachedLoad != null && cachedLoad in baseLoadConfigs) {
+                listOf(cachedLoad) + baseLoadConfigs.filter { it != cachedLoad }
+            } else {
+                baseLoadConfigs
             }
 
             var authSucceeded = false
@@ -1155,6 +1215,7 @@ class UsbNfcReaderManager(
                 )
 
                 if (authResp != null && authResp.isSuccess) {
+                    lastWorkingLoadParams = Pair(p1Structure, p2Slot)
                     authSucceeded = true
                     break
                 }
@@ -1311,11 +1372,11 @@ class UsbNfcReaderManager(
      */
     @Synchronized
     private fun drainStaleBulkIn() {
+        needsBulkInDrain = false
         val conn = activeConnection ?: return
         val epIn = bulkInEndpoint ?: return
-        val flushBuf = ByteArray(1024)
         repeat(4) {
-            val r = conn.bulkTransfer(epIn, flushBuf, flushBuf.size, 15)
+            val r = conn.bulkTransfer(epIn, sharedFlushBuffer, sharedFlushBuffer.size, 8)
             if (r <= 0) return
         }
     }
@@ -1332,10 +1393,17 @@ class UsbNfcReaderManager(
 
         val expectedSeq = frame[6]
         val sent = conn.bulkTransfer(epOut, frame, frame.size, USB_TIMEOUT_MS)
-        if (sent < 0) return null
+        if (sent < 0) {
+            needsBulkInDrain = true
+            return null
+        }
 
         repeat(8) {
-            val rawResp = readFullCcidPacket(conn, epIn) ?: return null
+            val rawResp = readFullCcidPacket(conn, epIn)
+            if (rawResp == null) {
+                needsBulkInDrain = true
+                return null
+            }
             val parsed = UsbCcidProtocol.parseCcidResponse(rawResp) ?: return null
             // Time Extension (commandStatus == 2) の場合はリーダーの処理完了を継続待機
             if (parsed.commandStatus == 2) {
@@ -1343,10 +1411,12 @@ class UsbNfcReaderManager(
             }
             // 前回のコマンドの遅延応答やSlotChange通知など、シーケンス番号が異なるフレームは読み飛ばす
             if (parsed.seq != expectedSeq && parsed.messageType != UsbCcidProtocol.MSG_RDR_TO_PC_SLOT_STATUS) {
+                needsBulkInDrain = true
                 return@repeat
             }
             return parsed
         }
+        needsBulkInDrain = true
         return null
     }
 
@@ -1354,8 +1424,8 @@ class UsbNfcReaderManager(
         conn: UsbDeviceConnection,
         epIn: UsbEndpoint
     ): ByteArray? {
-        // Android + Sony RC-S300 では分割受信を避けるため十分な大きさ(4096B)のバッファで一括受信する
-        val buffer = ByteArray(4096)
+        // Android + Sony RC-S300 では分割受信を避けるため事前確保済みバッファ(4096B)で一括受信する
+        val buffer = sharedReceiveBuffer
         val firstRead = conn.bulkTransfer(epIn, buffer, buffer.size, USB_TIMEOUT_MS)
         if (firstRead < 10) return null
 

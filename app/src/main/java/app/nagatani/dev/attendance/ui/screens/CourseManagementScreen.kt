@@ -6,6 +6,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -68,8 +70,10 @@ import app.nagatani.dev.attendance.data.local.SessionWithCount
 import app.nagatani.dev.attendance.export.CsvExportManager
 import java.time.LocalDate
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun CourseManagementScreen(
+    isCompact: Boolean = false,
     courses: List<CourseEntity>,
     selectedCourseId: Long?,
     sessions: List<SessionWithCount>,
@@ -96,12 +100,483 @@ fun CourseManagementScreen(
     val selectedCourse = courses.find { it.id == selectedCourseId }
     val selectedSessionWithCount = sessions.find { it.session.id == selectedSessionId }
 
-    Row(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        horizontalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
+    if (isCompact) {
+        // ============================================================
+        // スマートフォン向け：縦1カラム最適化レイアウト
+        // ============================================================
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // 1. 講義（科目）選択＆追加カード
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.School,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "講義一覧 (${courses.size})",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Button(
+                                onClick = { showAddCourseDialog = true },
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("新規講義")
+                            }
+                        }
+
+                        if (courses.isEmpty()) {
+                            Text(
+                                text = "講義が登録されていません。「新規講義」から追加してください。",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            LazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                items(courses, key = { it.id }) { course ->
+                                    val isSelected = course.id == selectedCourseId
+                                    val bgColor = if (isSelected) {
+                                        MaterialTheme.colorScheme.primaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                                    }
+                                    val borderColor = if (isSelected) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        Color.Transparent
+                                    }
+
+                                    Box(
+                                        modifier = Modifier
+                                            .width(230.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(bgColor)
+                                            .border(1.5.dp, borderColor, RoundedCornerShape(12.dp))
+                                            .clickable { onSelectCourse(course.id) }
+                                            .padding(horizontal = 12.dp, vertical = 10.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = course.courseCode,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.primary,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                Text(
+                                                    text = course.courseName,
+                                                    style = MaterialTheme.typography.bodyLarge,
+                                                    fontWeight = FontWeight.Bold,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                if (course.scheduleAndRoom.isNotBlank() || course.instructorName.isNotBlank()) {
+                                                    Text(
+                                                        text = listOf(course.scheduleAndRoom, course.instructorName)
+                                                            .filter { it.isNotBlank() }
+                                                            .joinToString(" / "),
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
+                                            }
+                                            IconButton(
+                                                onClick = { courseToDelete = course },
+                                                modifier = Modifier.size(32.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.DeleteOutline,
+                                                    contentDescription = "講義を削除",
+                                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. 選択中の講義回・出席受付開始・CSV出力・出席者リスト
+            if (selectedCourse != null) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text(
+                                text = "${selectedCourse.courseCode}  ${selectedCourse.courseName}",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold
+                            )
+                            if (selectedCourse.scheduleAndRoom.isNotBlank() || selectedCourse.instructorName.isNotBlank()) {
+                                Text(
+                                    text = listOf(
+                                        selectedCourse.scheduleAndRoom.takeIf { it.isNotBlank() },
+                                        selectedCourse.instructorName.takeIf { it.isNotBlank() }?.let { "担当: $it" }
+                                    ).filterNotNull().joinToString("  |  "),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = { onGenerate15Sessions(selectedCourse.id) },
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("全15回を一括作成", style = MaterialTheme.typography.labelLarge)
+                                }
+                                OutlinedButton(
+                                    onClick = { showAddSessionDialog = true },
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("講義回を追加", style = MaterialTheme.typography.labelLarge)
+                                }
+                            }
+
+                            Text(
+                                text = "講義回を選択:",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold
+                            )
+
+                            if (sessions.isEmpty()) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = "講義回がありません。「全15回を一括作成」または「講義回を追加」を押してください。",
+                                        modifier = Modifier.padding(12.dp),
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            } else {
+                                LazyRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    items(sessions, key = { it.session.id }) { item ->
+                                        val isSelected = item.session.id == selectedSessionId
+                                        FilterChip(
+                                            selected = isSelected,
+                                            onClick = { onSelectSession(item.session.id) },
+                                            label = {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    modifier = Modifier.padding(vertical = 2.dp)
+                                                ) {
+                                                    Text(
+                                                        text = "第${item.session.sessionNumber}回",
+                                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                                    )
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Badge(
+                                                        containerColor = if (item.attendanceCount > 0) {
+                                                            MaterialTheme.colorScheme.secondary
+                                                        } else {
+                                                            MaterialTheme.colorScheme.outlineVariant
+                                                        }
+                                                    ) {
+                                                        Text(
+                                                            text = "${item.attendanceCount}名",
+                                                            color = if (item.attendanceCount > 0) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+
+                            if (selectedSessionWithCount != null) {
+                                val currentSession = selectedSessionWithCount.session
+                                HorizontalDivider()
+
+                                ElevatedCard(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.elevatedCardColors(
+                                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                                    )
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(14.dp),
+                                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                text = "第${currentSession.sessionNumber}回",
+                                                style = MaterialTheme.typography.titleMedium,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                            Spacer(modifier = Modifier.width(10.dp))
+                                            Text(
+                                                text = currentSession.sessionTitle,
+                                                style = MaterialTheme.typography.bodyLarge,
+                                                fontWeight = FontWeight.SemiBold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        Text(
+                                            text = "実施日: ${currentSession.sessionDate}  |  出席数: ${selectedSessionWithCount.attendanceCount} 名",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Button(
+                                            onClick = {
+                                                onStartAttendanceKiosk(selectedCourse.id, currentSession.id)
+                                            },
+                                            modifier = Modifier.fillMaxWidth(),
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = MaterialTheme.colorScheme.primary
+                                            ),
+                                            contentPadding = PaddingValues(vertical = 12.dp)
+                                        ) {
+                                            Icon(Icons.Default.Nfc, contentDescription = null)
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = "出席受付モードを開始（全画面）",
+                                                fontSize = 15.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // スマホ向けアクションボタン群（折り返し対応）
+                                FlowRow(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    OutlinedButton(
+                                        onClick = { showManualEntryDialog = true },
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                    ) {
+                                        Icon(Icons.Default.PersonAdd, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("手動登録", style = MaterialTheme.typography.labelLarge)
+                                    }
+                                    Button(
+                                        onClick = {
+                                            onExportSessionToDefaultFolder(
+                                                currentSession.id,
+                                                selectedCourse.courseCode,
+                                                currentSession.sessionNumber
+                                            )
+                                        },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = MaterialTheme.colorScheme.secondary
+                                        ),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                    ) {
+                                        Icon(Icons.Default.FolderSpecial, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("所定の場所へCSV", style = MaterialTheme.typography.labelLarge)
+                                    }
+                                    OutlinedButton(
+                                        onClick = {
+                                            onExportSessionViaFilePicker(
+                                                currentSession.id,
+                                                selectedCourse.courseCode,
+                                                currentSession.sessionNumber
+                                            )
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                    ) {
+                                        Icon(Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("保存先選択", style = MaterialTheme.typography.labelLarge)
+                                    }
+                                    OutlinedButton(
+                                        onClick = {
+                                            onShareSessionCsv(
+                                                currentSession.id,
+                                                selectedCourse.courseCode,
+                                                currentSession.sessionNumber
+                                            )
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                    ) {
+                                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("共有", style = MaterialTheme.typography.labelLarge)
+                                    }
+                                }
+
+                                Text(
+                                    text = "第${currentSession.sessionNumber}回 出席登録一覧 (${attendanceRecords.size}件)",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+
+                                if (attendanceRecords.isEmpty()) {
+                                    Surface(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                                    ) {
+                                        Text(
+                                            text = "まだこの講義回の出席データはありません。\n「出席受付モードを開始」するか、学生証をタッチしてください。",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(16.dp)
+                                        )
+                                    }
+                                } else {
+                                    Column(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        attendanceRecords.forEach { record ->
+                                            Surface(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                shape = RoundedCornerShape(10.dp),
+                                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Column(modifier = Modifier.weight(1f)) {
+                                                        Row(
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                                        ) {
+                                                            Text(
+                                                                text = record.studentId,
+                                                                fontWeight = FontWeight.Bold,
+                                                                fontFamily = FontFamily.Monospace,
+                                                                fontSize = 16.sp
+                                                            )
+                                                            Surface(
+                                                                color = if (record.registrationMethod.startsWith("NFC")) {
+                                                                    MaterialTheme.colorScheme.primaryContainer
+                                                                } else {
+                                                                    MaterialTheme.colorScheme.tertiaryContainer
+                                                                },
+                                                                shape = RoundedCornerShape(6.dp)
+                                                            ) {
+                                                                Text(
+                                                                    text = record.registrationMethod,
+                                                                    style = MaterialTheme.typography.labelSmall,
+                                                                    fontWeight = FontWeight.SemiBold,
+                                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                                )
+                                                            }
+                                                        }
+                                                        Text(
+                                                            text = CsvExportManager.formatEpochMillis(record.registeredAt),
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            fontFamily = FontFamily.Monospace,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                        )
+                                                        val subInfo = listOf(
+                                                            record.cardUid.takeIf { it.isNotBlank() }?.let { "UID:$it" },
+                                                            record.note.takeIf { it.isNotBlank() }
+                                                        ).filterNotNull().joinToString(" / ")
+                                                        if (subInfo.isNotBlank()) {
+                                                            Text(
+                                                                text = subInfo,
+                                                                style = MaterialTheme.typography.labelSmall,
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                maxLines = 1,
+                                                                overflow = TextOverflow.Ellipsis
+                                                            )
+                                                        }
+                                                    }
+                                                    IconButton(onClick = { onDeleteAttendance(record) }) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.DeleteOutline,
+                                                            contentDescription = "出席記録を削除",
+                                                            tint = MaterialTheme.colorScheme.error
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        // ============================================================
+        // タブレット向け：左右2ペイン構成
+        // ============================================================
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
         // ============================================================
         // 左ペイン: 講義（科目）一覧（タブレット向けマスターリスト）
         // ============================================================
@@ -578,6 +1053,7 @@ fun CourseManagementScreen(
                 }
             }
         }
+    }
     }
 
     // ============================================================

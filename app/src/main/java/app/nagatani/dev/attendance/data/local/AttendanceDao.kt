@@ -89,7 +89,7 @@ interface AttendanceDao {
     )
     suspend fun findAttendanceRecord(sessionId: Long, studentId: String): AttendanceRecordEntity?
 
-    @Insert(onConflict = OnConflictStrategy.ABORT)
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertAttendance(record: AttendanceRecordEntity): Long
 
     @Delete

@@ -36,6 +36,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.time.LocalDate
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * アプリ内のメイン画面タブ
@@ -155,11 +156,14 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
     private val _statusMessage = MutableStateFlow<String?>(null)
     val statusMessage: StateFlow<String?> = _statusMessage.asStateFlow()
 
-    // 連続タッチチャタリング防止用（同一UIDの1.8秒以内の再検知を無視。ただし前回失敗→今回成功の場合は無視しない）
+    // 連続タッチチャタリング防止用（同一UIDの1.2秒以内の再検知を無視。ただし前回失敗→今回成功の場合は無視しない）
     private var lastScannedUid: String = ""
     private var lastScanEpochMillis: Long = 0L
     private var lastScanWasSuccess: Boolean = false
     private var bannerResetJob: Job? = null
+
+    // 低スペック端末のeMMCストレージI/O待ちを排除するためのインメモリ出席済みキャッシュ ("sessionId:studentId" -> registeredAt)
+    private val registeredSessionStudentTimestamps = ConcurrentHashMap<String, Long>()
 
     // SAFファイル保存ダイアログ待機中の一時データ保持
     private var pendingExportRows: List<AttendanceExportRow> = emptyList()
@@ -183,7 +187,22 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
         usbReaderManager.start()
 
         viewModelScope.launch(Dispatchers.IO) {
+            // 初回タッチ時のAudioTrack生成ラグ（約100〜180ms）をなくすため起動時にウォームアップ
+            SoundFeedbackManager.warmUp()
             AppDatabase.ensureSampleDataIfEmpty(dao)
+        }
+        // 選択中の講義回の出席レコードをインメモリキャッシュへ同期
+        viewModelScope.launch {
+            attendanceForSelectedSession.collect { records ->
+                val currentSessionId = _selectedSessionId.value
+                if (currentSessionId != null) {
+                    val prefix = "$currentSessionId:"
+                    registeredSessionStudentTimestamps.keys.removeIf { it.startsWith(prefix) }
+                    for (rec in records) {
+                        registeredSessionStudentTimestamps["${rec.sessionId}:${rec.studentId}"] = rec.registeredAt
+                    }
+                }
+            }
         }
         // 初回に講義が読み込まれた際、未選択なら先頭の講義を自動選択
         viewModelScope.launch {
@@ -409,12 +428,12 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
 
         val now = System.currentTimeMillis()
         val isSuccess = result is MifareReadResult.Success
-        // 同一カードがかざされっぱなしの場合のチャタリング防止（1.8秒以内）
+        // 同一カードがかざされっぱなしの場合のチャタリング防止（1.2秒以内）
         // ※ただし前回が失敗で今回リトライ成功した場合や、MIFARE設定画面での診断時はスキップしない
         if (_currentTab.value != AppTab.MIFARE_SETTINGS &&
             result.cardUid.isNotEmpty() &&
             result.cardUid == lastScannedUid &&
-            (now - lastScanEpochMillis) < 1800L &&
+            (now - lastScanEpochMillis) < 1200L &&
             !(isSuccess && !lastScanWasSuccess)
         ) {
             return
@@ -548,10 +567,16 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
         note: String
     ) {
         val soundEnabled = exportConfig.value.soundEnabled
-        val existing = dao.findAttendanceRecord(sessionId = sessionId, studentId = studentId)
+        val cacheKey = "$sessionId:$studentId"
 
-        if (existing != null) {
-            val firstTimeStr = CsvExportManager.formatEpochMillis(existing.registeredAt)
+        // 1. まずインメモリキャッシュ（または現在表示中のStateFlow）でO(1)重複判定（SQLite I/O待ちゼロ）
+        val cachedRegisteredAt = registeredSessionStudentTimestamps[cacheKey]
+            ?: attendanceForSelectedSession.value
+                .firstOrNull { it.sessionId == sessionId && it.studentId == studentId }
+                ?.registeredAt
+
+        if (cachedRegisteredAt != null) {
+            val firstTimeStr = CsvExportManager.formatEpochMillis(cachedRegisteredAt)
             SoundFeedbackManager.playDuplicateTone(soundEnabled)
             updateScanBanner(
                 ScanBannerState.Duplicate(
@@ -566,18 +591,10 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
         }
 
         val now = System.currentTimeMillis()
-        val record = AttendanceRecordEntity(
-            courseId = courseId,
-            sessionId = sessionId,
-            studentId = studentId,
-            cardUid = cardUid,
-            registeredAt = now,
-            registrationMethod = method,
-            note = note
-        )
-        dao.insertAttendance(record)
-
         val formattedNow = CsvExportManager.formatEpochMillis(now)
+
+        // 2. 低スペック端末のストレージ(eMMC)書込完了を待たずに、即座にピッ音と緑バナーを返す
+        registeredSessionStudentTimestamps[cacheKey] = now
         SoundFeedbackManager.playSuccessTone(soundEnabled)
         updateScanBanner(
             ScanBannerState.Success(
@@ -589,6 +606,30 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
         )
         if (_currentTab.value != AppTab.ATTENDANCE_KIOSK) {
             postMessage("出席登録完了: $studentId ($formattedNow)")
+        }
+
+        // 3. バックグラウンドでSQLiteへ永続化（万一DB側に既存レコードがあった場合は重複表示へ補正）
+        val record = AttendanceRecordEntity(
+            courseId = courseId,
+            sessionId = sessionId,
+            studentId = studentId,
+            cardUid = cardUid,
+            registeredAt = now,
+            registrationMethod = method,
+            note = note
+        )
+        val insertedRowId = dao.insertAttendance(record)
+        if (insertedRowId == -1L) {
+            val existing = dao.findAttendanceRecord(sessionId = sessionId, studentId = studentId)
+            val existingTime = existing?.registeredAt ?: now
+            registeredSessionStudentTimestamps[cacheKey] = existingTime
+            val firstTimeStr = CsvExportManager.formatEpochMillis(existingTime)
+            updateScanBanner(
+                ScanBannerState.Duplicate(
+                    studentId = studentId,
+                    firstRegisteredTimeText = firstTimeStr
+                )
+            )
         }
     }
 
@@ -604,6 +645,7 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun deleteAttendanceRecord(record: AttendanceRecordEntity) {
+        registeredSessionStudentTimestamps.remove("${record.sessionId}:${record.studentId}")
         viewModelScope.launch(Dispatchers.IO) {
             dao.deleteAttendance(record)
             postMessage("学籍番号 ${record.studentId} の出席記録を削除しました")
@@ -611,6 +653,7 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun deleteAttendanceRecordById(recordId: Long, studentId: String) {
+        registeredSessionStudentTimestamps.keys.removeIf { it.endsWith(":$studentId") }
         viewModelScope.launch(Dispatchers.IO) {
             dao.deleteAttendanceById(recordId)
             postMessage("学籍番号 $studentId の出席記録を削除しました")

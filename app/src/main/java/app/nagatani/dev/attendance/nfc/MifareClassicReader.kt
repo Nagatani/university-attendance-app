@@ -72,6 +72,15 @@ sealed class MifareReadResult {
  */
 object MifareClassicReader {
 
+    private val HEX_CHARS = "0123456789ABCDEF".toCharArray()
+
+    // 直近の読み取りで認証成功したセクターと鍵候補を記憶し、2人目以降のタッチ時に1発目で認証を通すキャッシュ
+    @Volatile
+    private var lastWorkingSector: Int? = null
+
+    @Volatile
+    private var lastWorkingCandidate: MifareKeyCandidate? = null
+
     /**
      * Android NFC [Tag] から [MifareConfig] の設定に従って学籍番号を読み取る
      * （バックグラウンドスレッド/ReaderModeコールバックから呼び出し可能）
@@ -139,13 +148,29 @@ object MifareClassicReader {
             }
 
             // 3. 候補セクター（指定セクターおよび鍵リストで明示指定されたセクター）に対して候補キーを順番に試行
-            val prioritySectors = config.resolvePrioritySectors().filter { it in 0 until sectorCount }
+            // ※直近の学生証で認証成功したセクター・鍵があれば最優先で試行し、1発で認証を完了させる
+            val baseSectors = config.resolvePrioritySectors().filter { it in 0 until sectorCount }
+            val cachedSec = lastWorkingSector
+            val prioritySectors = if (cachedSec != null && cachedSec in baseSectors) {
+                listOf(cachedSec) + baseSectors.filter { it != cachedSec }
+            } else {
+                baseSectors
+            }
+
             var matchedCandidate: MifareKeyCandidate? = null
             var matchedSector: Int = config.sectorIndex
             var attemptIndex = 0
+            val cachedCand = lastWorkingCandidate
 
             outerLoop@ for (sectorToTry in prioritySectors) {
-                val candidatesForSector = config.resolveKeyCandidatesForSector(sectorToTry)
+                val baseCandidates = config.resolveKeyCandidatesForSector(sectorToTry)
+                val candidatesForSector = if (cachedCand != null && baseCandidates.any { it.keyType == cachedCand.keyType && it.keyHex == cachedCand.keyHex }) {
+                    val prioritized = baseCandidates.first { it.keyType == cachedCand.keyType && it.keyHex == cachedCand.keyHex }
+                    listOf(prioritized) + baseCandidates.filterNot { it.keyType == cachedCand.keyType && it.keyHex == cachedCand.keyHex }
+                } else {
+                    baseCandidates
+                }
+
                 for (candidate in candidatesForSector) {
                     if (attemptIndex > 0) {
                         // MIFARE Classic仕様上、認証失敗後は一度HALT状態になるため再接続してから次の鍵を試行
@@ -163,6 +188,8 @@ object MifareClassicReader {
                     if (ok) {
                         matchedCandidate = candidate
                         matchedSector = sectorToTry
+                        lastWorkingSector = sectorToTry
+                        lastWorkingCandidate = candidate
                         break@outerLoop
                     }
                 }
@@ -298,11 +325,8 @@ object MifareClassicReader {
 
         val regexPattern = config.validationRegex.trim()
         if (regexPattern.isNotEmpty()) {
-            val regex = try {
-                Regex(regexPattern)
-            } catch (e: Exception) {
-                return BlockParseOutcome.Invalid("設定された正規表現が無効です: $regexPattern")
-            }
+            val regex = config.compiledValidationRegex
+                ?: return BlockParseOutcome.Invalid("設定された正規表現が無効です: $regexPattern")
 
             val match = regex.find(decodedRaw)
                 ?: return BlockParseOutcome.Invalid(
@@ -325,13 +349,27 @@ object MifareClassicReader {
     }
 
     /**
-     * バイト配列を16進数文字列に変換するユーティリティ
+     * バイト配列を16進数文字列に高速変換するユーティリティ（String.format不使用）
      */
     fun bytesToHex(bytes: ByteArray?, separator: String = " "): String {
         if (bytes == null || bytes.isEmpty()) return ""
-        return bytes.joinToString(separator) { b ->
-            String.format("%02X", b.toInt() and 0xFF)
+        if (separator.isEmpty()) {
+            val chars = CharArray(bytes.size * 2)
+            for (i in bytes.indices) {
+                val v = bytes[i].toInt() and 0xFF
+                chars[i * 2] = HEX_CHARS[v ushr 4]
+                chars[i * 2 + 1] = HEX_CHARS[v and 0x0F]
+            }
+            return String(chars)
         }
+        val sb = StringBuilder(bytes.size * (2 + separator.length))
+        for (i in bytes.indices) {
+            if (i > 0) sb.append(separator)
+            val v = bytes[i].toInt() and 0xFF
+            sb.append(HEX_CHARS[v ushr 4])
+            sb.append(HEX_CHARS[v and 0x0F])
+        }
+        return sb.toString()
     }
 
     /**

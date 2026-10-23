@@ -27,9 +27,13 @@ data class MifareKeyCandidate(
     /** 元テキストの行番号（1始まり） */
     val sourceLine: Int = 1
 ) {
-    fun toKeyBytes(): ByteArray = ByteArray(6) { i ->
-        keyHex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+    private val cachedKeyBytes: ByteArray by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        ByteArray(6) { i ->
+            keyHex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+        }
     }
+
+    fun toKeyBytes(): ByteArray = cachedKeyBytes
 
     val summaryLabel: String
         get() = buildString {
@@ -62,6 +66,7 @@ data class BulkKeyParseSummary(
  * 5. `A:FFFFFFFFFFFF` または `B:A0A1A2A3A4A5` （鍵種別 : 12桁HEX）
  */
 object MifareKeyTextParser {
+    private val SPLIT_REGEX = Regex("[:,]")
 
     fun isValidHex12(text: String): Boolean {
         return text.length == 12 && text.all { it in '0'..'9' || it in 'A'..'F' }
@@ -157,7 +162,7 @@ object MifareKeyTextParser {
                 return@forEachIndexed
             }
 
-            val parts = withoutComment.split(Regex("[:,]")).map { it.trim() }.filter { it.isNotEmpty() }
+            val parts = withoutComment.split(SPLIT_REGEX).map { it.trim() }.filter { it.isNotEmpty() }
             when (parts.size) {
                 2 -> {
                     val p0 = parts[0]
@@ -346,17 +351,32 @@ data class MifareConfig(
     /** 出席受付モード解除・鍵設定保護用の暗証番号（空欄の場合はPINロックなし） */
     val kioskPin: String = ""
 ) {
-    /**
-     * 一括指定テキスト全体をパースした結果を返す
-     */
-    fun parseBulkKeys(): BulkKeyParseSummary {
+    private val cachedBulkSummary: BulkKeyParseSummary by lazy(LazyThreadSafetyMode.PUBLICATION) {
         val textToParse = bulkKeysText.ifBlank { keyHex }
-        return MifareKeyTextParser.parse(
+        MifareKeyTextParser.parse(
             bulkText = textToParse,
             defaultKeyType = keyType,
             tryBothKeyTypesForPlainHex = tryBothKeyTypesForPlainHex
         )
     }
+
+    private val cachedPrioritySectors: List<Int> by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        val explicitSectors = cachedBulkSummary.candidates
+            .mapNotNull { it.targetSector }
+            .filter { it in 0..39 }
+        (listOf(sectorIndex) + explicitSectors).distinct()
+    }
+
+    /** 事前コンパイル済み正規表現（毎回タッチ時の Regex 再コンパイル負荷を排除） */
+    val compiledValidationRegex: Regex? by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        val pattern = validationRegex.trim()
+        if (pattern.isEmpty()) null else runCatching { Regex(pattern) }.getOrNull()
+    }
+
+    /**
+     * 一括指定テキスト全体をパースした結果を返す（キャッシュ済み）
+     */
+    fun parseBulkKeys(): BulkKeyParseSummary = cachedBulkSummary
 
     /**
      * 指定したセクター番号 [targetSector] の認証に試行すべき鍵候補リストを優先順で返す。
@@ -365,7 +385,7 @@ data class MifareConfig(
      * 3. もし対象セクター向けの候補が0件で他セクター指定の鍵のみ存在する場合は、それらもフォールバック候補に含める
      */
     fun resolveKeyCandidatesForSector(targetSector: Int = sectorIndex): List<MifareKeyCandidate> {
-        val summary = parseBulkKeys()
+        val summary = cachedBulkSummary
         val sectorSpecific = summary.candidates
             .filter { it.targetSector == targetSector }
             .sortedBy { it.keyHex == "FFFFFFFFFFFF" }
@@ -393,12 +413,7 @@ data class MifareConfig(
      * 1. 設定された [sectorIndex]
      * 2. 一括鍵テキスト内で明示的にセクター指定されている番号（例: `2:A:...` の `2`）
      */
-    fun resolvePrioritySectors(): List<Int> {
-        val explicitSectors = parseBulkKeys().candidates
-            .mapNotNull { it.targetSector }
-            .filter { it in 0..39 }
-        return (listOf(sectorIndex) + explicitSectors).distinct()
-    }
+    fun resolvePrioritySectors(): List<Int> = cachedPrioritySectors
 
     /**
      * 先頭の第1候補キーを6バイトのByteArrayとして返す（単一キーAPI・後方互換用）

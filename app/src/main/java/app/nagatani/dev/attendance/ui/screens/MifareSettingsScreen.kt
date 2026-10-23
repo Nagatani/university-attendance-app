@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -51,6 +52,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -78,6 +80,7 @@ import app.nagatani.dev.attendance.usb.UsbReaderState
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MifareSettingsScreen(
+    isCompact: Boolean = false,
     currentConfig: MifareConfig,
     lastDiagnosticResult: MifareReadResult?,
     usbReaderState: UsbReaderState,
@@ -90,6 +93,8 @@ fun MifareSettingsScreen(
     onSimulateDiagnosticCard: (sampleStudentId: String) -> Unit
 ) {
     val clipboardManager = LocalClipboardManager.current
+    // スマホ表示時のセクション切替 (0=すべて表示, 1=鍵・抽出設定のみ, 2=USB・カード診断のみ)
+    var mobileSectionTab by remember { mutableIntStateOf(0) }
 
     // 編集用ステート（保存済み設定で初期化）
     var sectorText by remember(currentConfig) { mutableStateOf(currentConfig.sectorIndex.toString()) }
@@ -157,125 +162,111 @@ fun MifareSettingsScreen(
         }
     }
 
-    Row(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        horizontalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        // ============================================================
-        // 左ペイン: MIFARE Classic 鍵・セクター・抽出フォーマット設定フォーム
-        // ============================================================
-        Card(
-            modifier = Modifier
-                .weight(1.15f)
-                .fillMaxHeight(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    @Composable
+    fun SettingsFormColumn(modifier: Modifier) {
+        Column(
+            modifier = modifier,
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(20.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Key,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "MIFARE Classic 学生証 鍵・読み取り設定",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-
-                    Button(
-                        onClick = { onSaveConfig(draftConfig) },
-                        enabled = isKeyValid
-                    ) {
-                        Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("設定を保存")
-                    }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Key,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = if (isCompact) "MIFARE 鍵・読み取り設定" else "MIFARE Classic 学生証 鍵・読み取り設定",
+                        style = if (isCompact) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
 
-                HorizontalDivider()
+                Button(
+                    onClick = { onSaveConfig(draftConfig) },
+                    enabled = isKeyValid,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                ) {
+                    Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("設定を保存")
+                }
+            }
 
-                // 1. セクター・ブロック・認証鍵の一括テキスト設定
+            HorizontalDivider()
+
+            // 1. セクター・ブロック・認証鍵の一括テキスト設定
+            Text(
+                text = "1. 読み取り対象セクター・ブロック ＆ 鍵データ一括テキスト指定",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                OutlinedTextField(
+                    value = sectorText,
+                    onValueChange = { sectorText = it.filter { ch -> ch.isDigit() } },
+                    label = { Text(if (isCompact) "セクター (0〜15)" else "読み取りセクター番号 (1K: 0〜15)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f)
+                )
+                OutlinedTextField(
+                    value = blockText,
+                    onValueChange = { blockText = it.filter { ch -> ch.isDigit() } },
+                    label = { Text(if (isCompact) "ブロック (0〜2)" else "セクター内ブロック番号 (通常 0〜2)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            // 一括テキスト指定のツールバー（クリップボード貼り付け・プリセット追加・表示切替）
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalArrangement = Arrangement.Center
+            ) {
                 Text(
-                    text = "1. 読み取り対象セクター・ブロック ＆ 鍵データ一括テキスト指定",
-                    style = MaterialTheme.typography.titleMedium,
+                    text = "セクター認証鍵リスト（複数行・一括指定）:",
+                    style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary
+                    modifier = Modifier.padding(vertical = 8.dp)
                 )
 
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    OutlinedTextField(
-                        value = sectorText,
-                        onValueChange = { sectorText = it.filter { ch -> ch.isDigit() } },
-                        label = { Text("読み取りセクター番号 (1K: 0〜15)") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                    OutlinedTextField(
-                        value = blockText,
-                        onValueChange = { blockText = it.filter { ch -> ch.isDigit() } },
-                        label = { Text("セクター内ブロック番号 (通常 0〜2)") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-
-                // 一括テキスト指定のツールバー（クリップボード貼り付け・プリセット追加・表示切替）
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "セクター認証鍵リスト（複数行・一括テキスト指定）:",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.Bold
-                    )
-
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedButton(
-                            onClick = {
-                                val clip = clipboardManager.getText()?.text
-                                if (!clip.isNullOrBlank()) {
-                                    bulkKeysText = clip
-                                }
+                    OutlinedButton(
+                        onClick = {
+                            val clip = clipboardManager.getText()?.text
+                            if (!clip.isNullOrBlank()) {
+                                bulkKeysText = clip
                             }
-                        ) {
-                            Icon(Icons.Default.ContentPaste, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("貼り付け")
-                        }
+                        },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Icon(Icons.Default.ContentPaste, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("貼り付け")
+                    }
 
-                        IconButton(onClick = { showKeyPlain = !showKeyPlain }) {
-                            Icon(
-                                imageVector = if (showKeyPlain) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                contentDescription = "鍵テキストの表示切替"
-                            )
-                        }
+                    IconButton(onClick = { showKeyPlain = !showKeyPlain }) {
+                        Icon(
+                            imageVector = if (showKeyPlain) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                            contentDescription = "鍵テキストの表示切替"
+                        )
                     }
                 }
+            }
 
                 // 複数行の鍵データ一括入力フィールド
                 OutlinedTextField(
@@ -528,58 +519,53 @@ fun MifareSettingsScreen(
             }
         }
 
-        // ============================================================
-        // 右ペイン: 外付けUSB NFCリーダー管理 ＆ リアルタイム・カード診断
-        // ============================================================
-        Card(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxHeight(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    @Composable
+    fun UsbAndDiagnosticColumn(modifier: Modifier) {
+        Column(
+            modifier = modifier,
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(20.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+            // --------------------------------------------------------
+            // 外付け USB NFCリーダー (PC/SC CCID) 接続状態＆デバイス一覧
+            // --------------------------------------------------------
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // --------------------------------------------------------
-                // 外付け USB NFCリーダー (PC/SC CCID) 接続状態＆デバイス一覧
-                // --------------------------------------------------------
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Usb,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "外付け USB NFCリーダー (PC/SC CCID)",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Usb,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "外付け USB NFCリーダー (PC/SC CCID)",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (usbReaderState is UsbReaderState.Connected) {
-                            OutlinedButton(onClick = onDisconnectUsbReader) {
-                                Text("切断")
-                            }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (usbReaderState is UsbReaderState.Connected) {
+                        OutlinedButton(
+                            onClick = onDisconnectUsbReader,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text("切断")
                         }
-                        OutlinedButton(onClick = onScanUsbReaders) {
-                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("USB再検出")
-                        }
+                    }
+                    OutlinedButton(
+                        onClick = onScanUsbReaders,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("USB再検出")
                     }
                 }
+            }
 
                 // 現在のUSB接続ステータスボックス
                 val (statusBg, statusTitle, statusDetail) = when (usbReaderState) {
@@ -682,10 +668,10 @@ fun MifareSettingsScreen(
                 // --------------------------------------------------------
                 // リアルタイム・カード診断（本体NFC ＆ 外付けUSBリーダー共通）
                 // --------------------------------------------------------
-                Row(
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
@@ -705,7 +691,8 @@ fun MifareSettingsScreen(
                         onClick = {
                             onSaveConfig(draftConfig)
                             onSimulateDiagnosticCard("24B10234")
-                        }
+                        },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
                     ) {
                         Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(4.dp))
@@ -971,6 +958,107 @@ fun MifareSettingsScreen(
                         }
                     }
                 }
+            }
+        }
+
+    if (isCompact) {
+        // ============================================================
+        // スマートフォン向け：セクション切替チップ ＋ 単一カラム縦スクロール
+        // ============================================================
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                FilterChip(
+                    selected = mobileSectionTab == 0,
+                    onClick = { mobileSectionTab = 0 },
+                    label = { Text("すべて表示") }
+                )
+                FilterChip(
+                    selected = mobileSectionTab == 1,
+                    onClick = { mobileSectionTab = 1 },
+                    label = { Text("1. 鍵・抽出設定") }
+                )
+                FilterChip(
+                    selected = mobileSectionTab == 2,
+                    onClick = { mobileSectionTab = 2 },
+                    label = { Text("2. USB・カード診断") }
+                )
+            }
+
+            if (mobileSectionTab == 0 || mobileSectionTab == 1) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    SettingsFormColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp)
+                    )
+                }
+            }
+
+            if (mobileSectionTab == 0 || mobileSectionTab == 2) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    UsbAndDiagnosticColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp)
+                    )
+                }
+            }
+        }
+    } else {
+        // ============================================================
+        // タブレット向け：左右2ペイン構成
+        // ============================================================
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Card(
+                modifier = Modifier
+                    .weight(1.15f)
+                    .fillMaxHeight(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                SettingsFormColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(20.dp)
+                        .verticalScroll(rememberScrollState())
+                )
+            }
+
+            Card(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                UsbAndDiagnosticColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(20.dp)
+                        .verticalScroll(rememberScrollState())
+                )
             }
         }
     }

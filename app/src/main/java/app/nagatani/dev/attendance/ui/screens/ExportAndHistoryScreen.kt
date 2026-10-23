@@ -6,6 +6,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -56,8 +59,10 @@ import app.nagatani.dev.attendance.data.preferences.ExportConfig
 import app.nagatani.dev.attendance.export.CsvExportManager
 import app.nagatani.dev.attendance.ui.ExportScope
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ExportAndHistoryScreen(
+    isCompact: Boolean = false,
     allRows: List<AttendanceExportRow>,
     courses: List<CourseEntity>,
     exportConfig: ExportConfig,
@@ -106,12 +111,302 @@ fun ExportAndHistoryScreen(
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
+    if (isCompact) {
+        // ============================================================
+        // スマートフォン向け：縦スクロール統合レイアウト
+        // ============================================================
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // 1. 所定のエクスポート先設定 ＆ CSV出力操作カード
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "所定の場所へのCSVエクスポート設定",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "保存先: $readableFolderUri",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.secondary
+                        )
+
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            if (!isDefaultDownloads) {
+                                OutlinedButton(
+                                    onClick = {
+                                        onUpdateExportConfig(
+                                            exportConfig.copy(
+                                                defaultDirectoryUri = ExportConfig.DEFAULT_DOWNLOADS_TARGET
+                                            )
+                                        )
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                ) {
+                                    Text("標準Downloadに戻す", style = MaterialTheme.typography.labelLarge)
+                                }
+                            }
+                            OutlinedButton(
+                                onClick = onPickDefaultDirectory,
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("別のフォルダを選択 (SAF)", style = MaterialTheme.typography.labelLarge)
+                            }
+                        }
+
+                        HorizontalDivider()
+
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        onUpdateExportConfig(
+                                            exportConfig.copy(includeUtf8Bom = !exportConfig.includeUtf8Bom)
+                                        )
+                                    }
+                            ) {
+                                Checkbox(
+                                    checked = exportConfig.includeUtf8Bom,
+                                    onCheckedChange = {
+                                        onUpdateExportConfig(exportConfig.copy(includeUtf8Bom = it))
+                                    }
+                                )
+                                Text(
+                                    text = "UTF-8 BOM付で出力（Excel文字化け防止）",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        onUpdateExportConfig(
+                                            exportConfig.copy(soundEnabled = !exportConfig.soundEnabled)
+                                        )
+                                    }
+                            ) {
+                                Checkbox(
+                                    checked = exportConfig.soundEnabled,
+                                    onCheckedChange = {
+                                        onUpdateExportConfig(exportConfig.copy(soundEnabled = it))
+                                    }
+                                )
+                                Text(
+                                    text = "カード読取時の効果音を有効化",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
+
+                        val scopeLabel = if (selectedCourseForExport != null) {
+                            "「${selectedCourseForExport.courseName}」"
+                        } else {
+                            "全講義データ"
+                        }
+
+                        Button(
+                            onClick = { onExportToDefaultFolder(activeScope) },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.secondary
+                            )
+                        ) {
+                            Icon(Icons.Default.FolderSpecial, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("${scopeLabel}を所定の場所へ出力")
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = { onExportViaFilePicker(activeScope) },
+                                modifier = Modifier.weight(1f),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                            ) {
+                                Icon(Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("保存先を指定", style = MaterialTheme.typography.labelLarge, maxLines = 1)
+                            }
+
+                            OutlinedButton(
+                                onClick = { onShareCsv(activeScope) },
+                                modifier = Modifier.weight(1f),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                            ) {
+                                Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("他アプリへ共有", style = MaterialTheme.typography.labelLarge, maxLines = 1)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. 検索・フィルタ・履歴一覧カード
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "登録済み出席データ（該当: ${filteredRows.size} 件 / 全 ${allRows.size} 件）",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        OutlinedTextField(
+                            value = searchQuery,
+                            onValueChange = { searchQuery = it },
+                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                            label = { Text("学籍番号・講義名・講義回で検索") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            item {
+                                FilterChip(
+                                    selected = filterCourseId == null,
+                                    onClick = { filterCourseId = null },
+                                    label = { Text("すべての講義") }
+                                )
+                            }
+                            items(courses, key = { it.id }) { course ->
+                                FilterChip(
+                                    selected = filterCourseId == course.id,
+                                    onClick = { filterCourseId = course.id },
+                                    label = { Text("${course.courseCode} ${course.courseName}") }
+                                )
+                            }
+                        }
+
+                        HorizontalDivider()
+
+                        if (filteredRows.isEmpty()) {
+                            Text(
+                                text = "該当する出席データがありません。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(vertical = 16.dp)
+                            )
+                        } else {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                filteredRows.forEach { row ->
+                                    Surface(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                                ) {
+                                                    Text(
+                                                        text = row.studentId,
+                                                        fontFamily = FontFamily.Monospace,
+                                                        fontWeight = FontWeight.Bold,
+                                                        style = MaterialTheme.typography.bodyLarge
+                                                    )
+                                                    Surface(
+                                                        color = MaterialTheme.colorScheme.primaryContainer,
+                                                        shape = RoundedCornerShape(6.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = "第${row.sessionNumber}回",
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = MaterialTheme.colorScheme.primary,
+                                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                        )
+                                                    }
+                                                    Text(
+                                                        text = row.registrationMethod,
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                }
+                                                Text(
+                                                    text = "${row.courseCode} ${row.courseName}",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                Text(
+                                                    text = CsvExportManager.formatEpochMillis(row.registeredAt) +
+                                                        if (row.cardUid.isNotBlank()) "  (UID:${row.cardUid})" else "",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                            IconButton(
+                                                onClick = { onDeleteRecordById(row.recordId, row.studentId) }
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.DeleteOutline,
+                                                    contentDescription = "削除",
+                                                    tint = MaterialTheme.colorScheme.error
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
         // ============================================================
         // 上段: 所定のエクスポート先設定 ＆ CSV出力操作パネル
         // ============================================================
@@ -431,5 +726,6 @@ fun ExportAndHistoryScreen(
                 }
             }
         }
+    }
     }
 }

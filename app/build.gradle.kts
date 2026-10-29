@@ -1,5 +1,6 @@
 import java.io.FileInputStream
 import java.security.MessageDigest
+import java.security.SecureRandom
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Properties
@@ -40,7 +41,11 @@ fun ensureReleaseKeystoreIfNeeded(): Properties {
             val keytoolFile = File(System.getProperty("java.home"), "bin/$keytoolBin")
             val keytoolCmd = if (keytoolFile.exists()) keytoolFile.absolutePath else keytoolBin
 
-            val defaultPass = "AttendanceRelease2026!"
+            // 新規生成時はランダムなパスワードを使用し、keystore.properties にのみ保存する
+            // （keystore/ と keystore.properties は紛失すると既存端末へ上書き更新できなくなるため必ずバックアップすること）
+            val passChars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+            val random = SecureRandom()
+            val defaultPass = (1..24).map { passChars[random.nextInt(passChars.length)] }.joinToString("")
             val defaultAlias = "attendance_release"
             val proc = ProcessBuilder(
                 keytoolCmd,
@@ -58,8 +63,9 @@ fun ensureReleaseKeystoreIfNeeded(): Properties {
             ).redirectErrorStream(true).start()
             proc.waitFor()
 
-            if (defaultKeystoreFile.exists() && !keystorePropsFile.exists()) {
-                keystorePropsFile.writeText(
+            if (defaultKeystoreFile.exists()) {
+                // 生成したランダムパスワードを失わないよう、既存の keystore.properties があれば追記する
+                keystorePropsFile.appendText(
                     """
                     # Release signing configuration for University Attendance App
                     # ご自身の署名キーストアを使用する場合は以下のパス・パスワード・エイリアスを変更してください
@@ -180,6 +186,11 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+}
+
+ksp {
+    // Room スキーマ履歴 (app/schemas/) を出力し、将来のマイグレーション作成・検証に使用する
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 dependencies {

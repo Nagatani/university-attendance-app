@@ -23,9 +23,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
-import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material.icons.filled.FolderSpecial
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Nfc
@@ -44,6 +44,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -52,6 +54,8 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -113,8 +117,22 @@ fun AttendanceKioskScreen(
     }
 
     var showManualDialog by remember { mutableStateOf(false) }
-    var showPinExitDialog by remember { mutableStateOf(false) }
+    var pinProtectedAction by remember { mutableStateOf<PinProtectedAction?>(null) }
     var simCounter by remember { mutableIntStateOf(10234) }
+
+    // 管理者PINが設定されている場合、学生による代理登録・データ持ち出し・受付終了を防ぐためPIN入力を要求する
+    fun runWithPin(purpose: String, action: () -> Unit) {
+        if (mifareConfig.kioskPin.isNotBlank()) {
+            pinProtectedAction = PinProtectedAction(purpose, action)
+        } else {
+            action()
+        }
+    }
+
+    // 戻るボタンでの受付モード離脱も「受付終了」と同様に扱う
+    BackHandler {
+        runWithPin("出席受付モードを終了") { onExitKioskMode() }
+    }
 
     val statusSummaryText = remember(mifareConfig, usbReaderState, isNfcAvailable, isNfcEnabled, isCompact) {
         buildString {
@@ -484,7 +502,7 @@ fun AttendanceKioskScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Button(
-                        onClick = { showManualDialog = true },
+                        onClick = { runWithPin("手動入力で出席登録") { showManualDialog = true } },
                         modifier = Modifier.weight(1f),
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF334155)),
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp)
@@ -496,8 +514,10 @@ fun AttendanceKioskScreen(
 
                     Button(
                         onClick = {
-                            val nextStudentId = "24B${simCounter++}"
-                            onSimulateCardTap(nextStudentId)
+                            runWithPin("テスト読取を実行") {
+                                val nextStudentId = "24B${simCounter++}"
+                                onSimulateCardTap(nextStudentId)
+                            }
                         },
                         modifier = Modifier.weight(1f),
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0F766E)),
@@ -516,7 +536,7 @@ fun AttendanceKioskScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Button(
-                        onClick = onExportCurrentSession,
+                        onClick = { runWithPin("CSV出力") { onExportCurrentSession() } },
                         modifier = Modifier.weight(1f),
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp)
@@ -531,18 +551,12 @@ fun AttendanceKioskScreen(
                     }
 
                     OutlinedButton(
-                        onClick = {
-                            if (mifareConfig.kioskPin.isNotBlank()) {
-                                showPinExitDialog = true
-                            } else {
-                                onExitKioskMode()
-                            }
-                        },
+                        onClick = { runWithPin("出席受付モードを終了") { onExitKioskMode() } },
                         modifier = Modifier.weight(0.85f),
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp)
                     ) {
                         Icon(
-                            Icons.Default.ExitToApp,
+                            Icons.AutoMirrored.Filled.ExitToApp,
                             contentDescription = null,
                             tint = Color(0xFFCBD5E1),
                             modifier = Modifier.size(16.dp)
@@ -859,16 +873,16 @@ fun AttendanceKioskScreen(
         )
     }
 
-    if (showPinExitDialog) {
-        var pinInput by remember { mutableStateOf("") }
-        var pinError by remember { mutableStateOf(false) }
+    pinProtectedAction?.let { pending ->
+        var pinInput by remember(pending) { mutableStateOf("") }
+        var pinError by remember(pending) { mutableStateOf(false) }
 
         AlertDialog(
-            onDismissRequest = { showPinExitDialog = false },
+            onDismissRequest = { pinProtectedAction = null },
             title = { Text("管理者PINコード入力") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("出席受付モードを終了するには管理者PINを入力してください。")
+                    Text("「${pending.purpose}」には管理者PINを入力してください。")
                     OutlinedTextField(
                         value = pinInput,
                         onValueChange = {
@@ -878,6 +892,8 @@ fun AttendanceKioskScreen(
                         label = { Text("PINコード") },
                         isError = pinError,
                         singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
                         modifier = Modifier.fillMaxWidth()
                     )
                     if (pinError) {
@@ -893,21 +909,29 @@ fun AttendanceKioskScreen(
                 Button(
                     onClick = {
                         if (pinInput == mifareConfig.kioskPin) {
-                            showPinExitDialog = false
-                            onExitKioskMode()
+                            pinProtectedAction = null
+                            pending.action()
                         } else {
                             pinError = true
                         }
                     }
                 ) {
-                    Text("解除して戻る")
+                    Text("認証して実行")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showPinExitDialog = false }) {
+                TextButton(onClick = { pinProtectedAction = null }) {
                     Text("キャンセル")
                 }
             }
         )
     }
 }
+
+/**
+ * 管理者PIN入力後に実行する操作
+ */
+private class PinProtectedAction(
+    val purpose: String,
+    val action: () -> Unit
+)

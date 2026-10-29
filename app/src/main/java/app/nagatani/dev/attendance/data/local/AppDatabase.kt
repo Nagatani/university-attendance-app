@@ -13,7 +13,7 @@ import java.time.LocalDate
         AttendanceRecordEntity::class
     ],
     version = 1,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
 
@@ -30,7 +30,8 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "university_attendance.db"
                 )
-                    .fallbackToDestructiveMigration()
+                    // 出席記録を失わないよう破壊的マイグレーションは使用しない。
+                    // スキーマ変更時は version を上げ、app/schemas の差分をもとに Migration を addMigrations() で追加すること
                     .build()
                 INSTANCE = instance
                 instance

@@ -18,11 +18,13 @@ import app.nagatani.dev.attendance.data.preferences.MifareKeyCandidate
 import app.nagatani.dev.attendance.data.preferences.MifareKeyType
 import app.nagatani.dev.attendance.nfc.MifareClassicReader
 import app.nagatani.dev.attendance.nfc.MifareReadResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -672,6 +674,14 @@ class UsbNfcReaderManager(
     }
 
     fun disconnectCurrentReader() {
+        releaseActiveConnection()
+        _readerState.value = UsbReaderState.Disconnected
+    }
+
+    /**
+     * ポーリングを停止し、USB接続・インターフェースを解放する（状態表示は変更しない）
+     */
+    private fun releaseActiveConnection() {
         pollingJob?.cancel()
         pollingJob = null
         val conn = activeConnection
@@ -688,7 +698,6 @@ class UsbNfcReaderManager(
                 conn.close()
             }
         }
-        _readerState.value = UsbReaderState.Disconnected
     }
 
     /**
@@ -707,8 +716,10 @@ class UsbNfcReaderManager(
         var lastFailedEmitMillis: Long = 0L
         var consecutiveIoErrors = 0
         var sonyProtocolInitialized = false
+        // 再接続後に旧ループが新しい接続へコマンドを送らないよう、開始時の接続が有効な間だけ動作する
+        val ownConnection = activeConnection ?: return
 
-        while (scope.isActive && activeConnection != null) {
+        while (currentCoroutineContext().isActive && activeConnection === ownConnection) {
             try {
                 val config = configProvider()
                 val currentConfigSig = "${config.sectorIndex}:${config.blockIndexInSector}:${config.keyType}:${config.bulkKeysText}:${config.tryBothKeyTypesForPlainHex}:${config.encoding}:${config.byteOffset}:${config.byteLength}:${config.validationRegex}:${config.allowUidFallback}"
@@ -875,9 +886,15 @@ class UsbNfcReaderManager(
                 }
 
                 delay(40L)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 consecutiveIoErrors++
                 if (consecutiveIoErrors > 15) {
+                    // 接続を解放しておかないと scanAndAutoConnect() が接続済みと判断して再接続できない
+                    if (activeConnection === ownConnection) {
+                        releaseActiveConnection()
+                    }
                     _readerState.value = UsbReaderState.Error(
                         "USBリーダーとの通信が切断されました (${e.localizedMessage ?: "Communication Error"})"
                     )

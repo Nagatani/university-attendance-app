@@ -23,6 +23,7 @@ import app.nagatani.dev.attendance.usb.UsbDeviceSummary
 import app.nagatani.dev.attendance.usb.UsbNfcReaderManager
 import app.nagatani.dev.attendance.usb.UsbReaderState
 import app.nagatani.dev.attendance.util.SoundFeedbackManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -160,6 +161,7 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
     private var lastScannedUid: String = ""
     private var lastScanEpochMillis: Long = 0L
     private var lastScanWasSuccess: Boolean = false
+    private val scanDebounceLock = Any()
     private var bannerResetJob: Job? = null
 
     // 低スペック端末のeMMCストレージI/O待ちを排除するためのインメモリ出席済みキャッシュ ("sessionId:studentId" -> registeredAt)
@@ -430,17 +432,21 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
         val isSuccess = result is MifareReadResult.Success
         // 同一カードがかざされっぱなしの場合のチャタリング防止（1.2秒以内）
         // ※ただし前回が失敗で今回リトライ成功した場合や、MIFARE設定画面での診断時はスキップしない
-        if (_currentTab.value != AppTab.MIFARE_SETTINGS &&
-            result.cardUid.isNotEmpty() &&
-            result.cardUid == lastScannedUid &&
-            (now - lastScanEpochMillis) < 1200L &&
-            !(isSuccess && !lastScanWasSuccess)
-        ) {
-            return
+        // USBリーダーと本体NFCのコールバックが別スレッドから同時に来ても判定と更新が競合しないよう排他する
+        val isChatter = synchronized(scanDebounceLock) {
+            val chatter = _currentTab.value != AppTab.MIFARE_SETTINGS &&
+                result.cardUid.isNotEmpty() &&
+                result.cardUid == lastScannedUid &&
+                (now - lastScanEpochMillis) < 1200L &&
+                !(isSuccess && !lastScanWasSuccess)
+            if (!chatter) {
+                lastScannedUid = result.cardUid
+                lastScanEpochMillis = now
+                lastScanWasSuccess = isSuccess
+            }
+            chatter
         }
-        lastScannedUid = result.cardUid
-        lastScanEpochMillis = now
-        lastScanWasSuccess = isSuccess
+        if (isChatter) return
 
         val soundEnabled = exportConfig.value.soundEnabled
 
@@ -618,7 +624,24 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
             registrationMethod = method,
             note = note
         )
-        val insertedRowId = dao.insertAttendance(record)
+        val insertedRowId = try {
+            dao.insertAttendance(record)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // 受付中に講義回が削除された（外部キー制約違反）等で保存できなかった場合は、先行表示した成功を取り消す
+            registeredSessionStudentTimestamps.remove(cacheKey)
+            SoundFeedbackManager.playErrorTone(soundEnabled)
+            updateScanBanner(
+                ScanBannerState.Error(
+                    title = "出席記録を保存できませんでした",
+                    message = "学籍番号 $studentId の登録に失敗しました。講義回が削除されていないか確認し、もう一度タッチしてください。(${e.localizedMessage ?: e.javaClass.simpleName})",
+                    cardUid = cardUid
+                )
+            )
+            postMessage("出席登録エラー: $studentId (${e.localizedMessage ?: e.javaClass.simpleName})")
+            return
+        }
         if (insertedRowId == -1L) {
             val existing = dao.findAttendanceRecord(sessionId = sessionId, studentId = studentId)
             val existingTime = existing?.registeredAt ?: now

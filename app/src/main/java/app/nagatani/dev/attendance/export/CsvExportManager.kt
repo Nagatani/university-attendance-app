@@ -26,6 +26,8 @@ import java.time.format.DateTimeFormatter
  */
 object CsvExportManager {
 
+    private val FORMULA_TRIGGER_CHARS = charArrayOf('=', '+', '@', '\t', '\r')
+
     private val timestampFormatter: DateTimeFormatter =
         DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 
@@ -251,7 +253,9 @@ object CsvExportManager {
             .format(timestampFormatter)
     }
 
-    private fun escapeCsvField(field: String): String {
+    private fun escapeCsvField(rawField: String): String {
+        // Excel等で数式として実行されないよう、= + @ タブ CR で始まる値は先頭に ' を付ける（CSVインジェクション対策）
+        val field = if (rawField.isNotEmpty() && rawField[0] in FORMULA_TRIGGER_CHARS) "'$rawField" else rawField
         val needsQuotes = field.contains(',') ||
             field.contains('"') ||
             field.contains('\n') ||

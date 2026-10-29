@@ -67,13 +67,14 @@ class MifareAndCsvTest {
             tryBothKeyTypesForPlainHex = false
         )
         val candidatesS1 = configSector1.resolveKeyCandidatesForSector(targetSector = 1)
-        // Sector 1 固有の 112233445566 (Key B) が最優先され、その後に共通鍵 FFFFFFFFFFFF, A0A1A2A3A4A5 (Key A) が続く
+        // Sector 1 固有の 112233445566 (Key B) が最優先され、その後に共通鍵 A0A1A2A3A4A5 (Key A) が続く
+        // 工場出荷時の初期鍵 FFFFFFFFFFFF は学生証では使われにくいため最後に試行される
         assertEquals(3, candidatesS1.size)
         assertEquals("112233445566", candidatesS1[0].keyHex)
         assertEquals(MifareKeyType.KEY_B, candidatesS1[0].keyType)
-        assertEquals("FFFFFFFFFFFF", candidatesS1[1].keyHex)
+        assertEquals("A0A1A2A3A4A5", candidatesS1[1].keyHex)
         assertEquals(MifareKeyType.KEY_A, candidatesS1[1].keyType)
-        assertEquals("A0A1A2A3A4A5", candidatesS1[2].keyHex)
+        assertEquals("FFFFFFFFFFFF", candidatesS1[2].keyHex)
     }
 
     @Test
@@ -200,5 +201,31 @@ class MifareAndCsvTest {
         assertTrue(csv.startsWith("\uFEFF"))
         assertTrue(csv.contains("講義コード,講義名,講義回,講義回タイトル,講義日,学籍番号,出席登録日時,登録方法,カードUID,備考"))
         assertTrue(csv.contains("INFO-101,情報工学概論,第3回,ネットワーク基礎,2026-10-20,24B10234,"))
+    }
+
+    @Test
+    fun buildCsvContent_neutralizesSpreadsheetFormulas() {
+        val row = AttendanceExportRow(
+            recordId = 1L,
+            courseId = 10L,
+            courseCode = "INFO-101",
+            courseName = "情報工学概論",
+            scheduleAndRoom = "",
+            sessionId = 100L,
+            sessionNumber = 1,
+            sessionTitle = "ガイダンス",
+            sessionDate = "2026-10-20",
+            studentId = "=HYPERLINK(\"http://example.com\")",
+            cardUid = "",
+            registeredAt = 1792428000000L,
+            registrationMethod = "MANUAL",
+            note = "@SUM(A1)"
+        )
+
+        val csv = CsvExportManager.buildCsvContent(listOf(row), includeUtf8Bom = false)
+        assertTrue(csv.contains(",\"'=HYPERLINK(\"\"http://example.com\"\")\","))
+        assertTrue(csv.contains(",'@SUM(A1)\r\n"))
+        // 通常の値（ハイフンを含む講義コード等）は変更しない
+        assertTrue(csv.contains("INFO-101,情報工学概論,第1回,"))
     }
 }

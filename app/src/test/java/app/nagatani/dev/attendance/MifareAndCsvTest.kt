@@ -118,6 +118,22 @@ class MifareAndCsvTest {
     }
 
     @Test
+    fun extractStudentIdFromBlock_hexKeepsTrailingZeroDigits() {
+        // 学籍番号 0123456780 を5バイトに格納し、残りを 0x00 パディング
+        val block = ByteArray(16)
+        byteArrayOf(0x01, 0x23, 0x45, 0x67, 0x80.toByte()).copyInto(block)
+        val config = MifareConfig(
+            encoding = StudentIdEncoding.HEX_STRING,
+            byteOffset = 0,
+            byteLength = 8,
+            trimNullAndSpaces = true
+        )
+
+        val outcome = MifareClassicReader.extractStudentIdFromBlock(block, config)
+        assertEquals(MifareClassicReader.BlockParseOutcome.Valid("0123456780"), outcome)
+    }
+
+    @Test
     fun usbCcidProtocol_buildsValidPcScApdusAndFrames() {
         // Sector 1, Block 0 -> Absolute Block 4
         val absBlock = UsbCcidProtocol.sectorToAbsoluteBlock(sectorIndex = 1, blockIndexInSector = 0)

@@ -296,12 +296,14 @@ object MifareClassicReader {
             }
 
             StudentIdEncoding.HEX_STRING -> {
-                val hex = bytesToHex(slice, separator = "")
-                if (config.trimNullAndSpaces) {
-                    hex.trimEnd('0', ' ')
+                // パディングはバイト単位（末尾の 0x00）で除去する。
+                // 文字単位で '0' を削ると「…80」のような学籍番号末尾の 0 まで消えてしまうため
+                val bytes = if (config.trimNullAndSpaces) {
+                    slice.copyOf(slice.indexOfLast { it != 0x00.toByte() } + 1)
                 } else {
-                    hex
+                    slice
                 }
+                bytesToHex(bytes, separator = "")
             }
 
             StudentIdEncoding.BCD_DECIMAL -> {

@@ -26,6 +26,8 @@ import java.time.format.DateTimeFormatter
  */
 object CsvExportManager {
 
+    private const val SHARE_CACHE_RETENTION_MILLIS = 60 * 60 * 1000L
+
     private val FORMULA_TRIGGER_CHARS = charArrayOf('=', '+', '@', '\t', '\r')
 
     private val timestampFormatter: DateTimeFormatter =
@@ -222,6 +224,12 @@ object CsvExportManager {
             val exportDir = File(context.cacheDir, "exports").apply {
                 if (!exists()) mkdirs()
             }
+            // 学籍番号を含む共有用CSVが蓄積しないよう、前回までの共有ファイルを削除してから作成する
+            // （直前の共有先アプリが読み取り中の可能性を考慮し、1時間以内のファイルは残す）
+            val staleThreshold = System.currentTimeMillis() - SHARE_CACHE_RETENTION_MILLIS
+            exportDir.listFiles()
+                ?.filter { it.isFile && it.lastModified() < staleThreshold }
+                ?.forEach { it.delete() }
             val csvFile = File(exportDir, fileName)
             val csvText = buildCsvContent(rows, includeUtf8Bom)
             csvFile.writeText(csvText, StandardCharsets.UTF_8)

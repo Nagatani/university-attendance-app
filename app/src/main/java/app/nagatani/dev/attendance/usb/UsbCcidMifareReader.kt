@@ -406,6 +406,12 @@ class UsbNfcReaderManager(
     private var sequenceNumber: Byte = 0
     private var isReceiverRegistered = false
 
+    // USB権限ダイアログの多重表示・拒否後の自動再表示を防ぐための状態
+    // （ダイアログを閉じると Activity#onResume から自動再検索が走るため、これがないと拒否しても繰り返し表示される）
+    @Volatile
+    private var pendingPermissionDeviceName: String? = null
+    private val permissionDeniedDeviceNames: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
     // 低スペックタブレットでのGC負荷・メモリアロケーションを排除する再利用バッファ
     private val sharedReceiveBuffer = ByteArray(4096)
     private val sharedFlushBuffer = ByteArray(1024)
@@ -443,6 +449,12 @@ class UsbNfcReaderManager(
 
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     val device = extractUsbDevice(intent)
+                    if (device != null) {
+                        permissionDeniedDeviceNames.remove(device.deviceName)
+                        if (device.deviceName == pendingPermissionDeviceName) {
+                            pendingPermissionDeviceName = null
+                        }
+                    }
                     if (device != null && device.deviceName == activeDevice?.deviceName) {
                         disconnectCurrentReader()
                         onStatusLog("USB NFCリーダーが取り外されました")
@@ -453,10 +465,13 @@ class UsbNfcReaderManager(
                 ACTION_USB_PERMISSION -> {
                     val device = extractUsbDevice(intent)
                     val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+                    pendingPermissionDeviceName = null
                     refreshDeviceList()
                     if (granted && device != null) {
+                        permissionDeniedDeviceNames.remove(device.deviceName)
                         openAndStartPolling(device)
                     } else {
+                        device?.let { permissionDeniedDeviceNames.add(it.deviceName) }
                         _readerState.value = UsbReaderState.Error("USBデバイスへのアクセス権限が拒否されました")
                         onStatusLog("USBリーダーのアクセス権限が許可されませんでした")
                     }
@@ -501,13 +516,23 @@ class UsbNfcReaderManager(
     /**
      * 現在接続されているUSBデバイス一覧を更新し、NFCリーダーがあれば自動接続を試みる
      */
-    fun scanAndAutoConnect() {
+    /**
+     * @param userInitiated ユーザーが再検索をタップした場合は true。
+     *   false（画面復帰時などの自動検索）の場合、一度権限を拒否されたデバイスには許可ダイアログを再表示しない
+     */
+    fun scanAndAutoConnect(userInitiated: Boolean = false) {
         refreshDeviceList()
         if (activeConnection != null) return
 
         val candidate = usbManager.deviceList.values.firstOrNull { isCandidateNfcReader(it) }
         if (candidate != null) {
-            connectToDevice(candidate)
+            if (!userInitiated &&
+                candidate.deviceName in permissionDeniedDeviceNames &&
+                !usbManager.hasPermission(candidate)
+            ) {
+                return
+            }
+            connectToDevice(candidate, userInitiated = userInitiated)
         }
     }
 
@@ -517,7 +542,7 @@ class UsbNfcReaderManager(
     fun connectToDeviceByName(usbDeviceNameKey: String) {
         val device = usbManager.deviceList[usbDeviceNameKey]
         if (device != null) {
-            connectToDevice(device)
+            connectToDevice(device, userInitiated = true)
         } else {
             onStatusLog("指定されたUSBデバイスが見つかりません")
             refreshDeviceList()
@@ -557,9 +582,12 @@ class UsbNfcReaderManager(
         return hasBulkPair && (hasCcidInterface || isKnownVendor)
     }
 
-    private fun connectToDevice(device: UsbDevice) {
+    private fun connectToDevice(device: UsbDevice, userInitiated: Boolean = false) {
         val displayName = buildDeviceDisplayName(device)
         if (!usbManager.hasPermission(device)) {
+            // 許可ダイアログ表示中は自動で再要求しない（端末によって結果が届かない場合に備え、ユーザー操作時は再要求する）
+            if (!userInitiated && pendingPermissionDeviceName == device.deviceName) return
+            pendingPermissionDeviceName = device.deviceName
             _readerState.value = UsbReaderState.PermissionRequired(
                 deviceName = displayName,
                 vendorId = device.vendorId,

@@ -59,7 +59,9 @@ sealed class ScanBannerState {
         val studentId: String,
         val cardUid: String,
         val registeredTimeText: String,
-        val method: String
+        val method: String,
+        /** テスト読取など、出席データに保存しない読み取り結果か */
+        val isTestOnly: Boolean = false
     ) : ScanBannerState()
 
     data class Duplicate(
@@ -191,7 +193,7 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch(Dispatchers.IO) {
             // 初回タッチ時のAudioTrack生成ラグ（約100〜180ms）をなくすため起動時にウォームアップ
             SoundFeedbackManager.warmUp()
-            AppDatabase.ensureSampleDataIfEmpty(dao)
+            AppDatabase.ensureSampleDataOnFirstLaunch(getApplication(), dao)
         }
         // 選択中の講義回の出席レコードをインメモリキャッシュへ同期
         viewModelScope.launch {
@@ -233,8 +235,11 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
         usbReaderManager.stop()
     }
 
-    fun scanUsbReaders() {
-        usbReaderManager.scanAndAutoConnect()
+    /**
+     * @param userInitiated ユーザー操作による再検索の場合 true（権限を拒否済みのデバイスにも再度許可を求める）
+     */
+    fun scanUsbReaders(userInitiated: Boolean = true) {
+        usbReaderManager.scanAndAutoConnect(userInitiated)
     }
 
     fun connectUsbDevice(usbDeviceNameKey: String) {
@@ -417,13 +422,14 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
                     reason = outcome.reason
                 )
             }
-            handleMifareReadResult(result, sourceLabel = "NFC(テスト)")
+            handleMifareReadResult(result, sourceLabel = "NFC(テスト)", isSimulation = true)
         }
     }
 
     private suspend fun handleMifareReadResult(
         result: MifareReadResult,
-        sourceLabel: String = "NFC"
+        sourceLabel: String = "NFC",
+        isSimulation: Boolean = false
     ) {
         // 常に最新のカード診断結果として保持（MIFARE設定タブでの確認用）
         _lastDiagnosticResult.value = result
@@ -450,12 +456,18 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
 
         val soundEnabled = exportConfig.value.soundEnabled
 
-        // MIFARE設定画面を開いているときは出席登録せず診断結果のみ更新して通知
-        if (_currentTab.value == AppTab.MIFARE_SETTINGS) {
+        // 出席受付モード以外では出席登録せず、読み取り結果の通知のみ行う
+        // （講義管理画面等でのカード確認や、アプリ起動時のNFCインテントで意図しない講義回へ登録されるのを防ぐ）
+        if (_currentTab.value != AppTab.ATTENDANCE_KIOSK) {
+            val isDiagnosticTab = _currentTab.value == AppTab.MIFARE_SETTINGS
             when (result) {
                 is MifareReadResult.Success -> {
                     SoundFeedbackManager.playSuccessTone(soundEnabled)
-                    postMessage("[$sourceLabel] カード診断成功: 学籍番号「${result.studentId}」を抽出しました")
+                    if (isDiagnosticTab) {
+                        postMessage("[$sourceLabel] カード診断成功: 学籍番号「${result.studentId}」を抽出しました")
+                    } else {
+                        postMessage("[$sourceLabel] 学籍番号「${result.studentId}」を読み取りました（出席登録は「出席受付モード」で行われます）")
+                    }
                 }
                 is MifareReadResult.AuthFailed -> {
                     SoundFeedbackManager.playErrorTone(soundEnabled)
@@ -491,6 +503,20 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
 
         when (result) {
             is MifareReadResult.Success -> {
+                if (isSimulation) {
+                    // テスト読取は動作確認用のため、本番の出席データには保存しない
+                    SoundFeedbackManager.playSuccessTone(soundEnabled)
+                    updateScanBanner(
+                        ScanBannerState.Success(
+                            studentId = result.studentId,
+                            cardUid = result.cardUid,
+                            registeredTimeText = CsvExportManager.formatEpochMillis(now),
+                            method = "テスト読取",
+                            isTestOnly = true
+                        )
+                    )
+                    return
+                }
                 val methodStr = if (result.isUidFallback) "${sourceLabel}-UID" else sourceLabel
                 registerAttendanceInternal(
                     courseId = courseId,
@@ -784,8 +810,10 @@ class AttendanceViewModel(application: Application) : AndroidViewModel(applicati
      * SAF ファイル選択ダイアログで保存先URIが決定した後に呼ばれるコールバック
      */
     fun onExportDestinationUriPicked(context: Context, targetUri: Uri?) {
-        if (targetUri == null) return
         val rowsToWrite = pendingExportRows
+        // 個人情報を含む出力データをメモリに残さない（保存をキャンセルした場合も破棄する）
+        pendingExportRows = emptyList()
+        if (targetUri == null) return
         if (rowsToWrite.isEmpty()) {
             postMessage("出力対象データがありません")
             return

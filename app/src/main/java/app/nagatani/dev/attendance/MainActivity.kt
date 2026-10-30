@@ -185,7 +185,7 @@ class MainActivity : ComponentActivity(), NfcAdapter.ReaderCallback {
             }
             adapter.enableReaderMode(this, this, flags, options)
         }
-        viewModel.scanUsbReaders()
+        viewModel.scanUsbReaders(userInitiated = false)
     }
 
     override fun onPause() {
@@ -196,7 +196,7 @@ class MainActivity : ComponentActivity(), NfcAdapter.ReaderCallback {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         if (intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {
-            viewModel.scanUsbReaders()
+            viewModel.scanUsbReaders(userInitiated = false)
         }
         extractTagFromIntent(intent)?.let { tag ->
             viewModel.onNfcTagDiscovered(tag)
@@ -310,6 +310,7 @@ fun UniversityAttendanceTabletApp(
                     onCreateSession = { cId, sNum, title, date ->
                         viewModel.createSession(cId, sNum, title, date)
                     },
+                    onDeleteSession = { viewModel.deleteSession(it) },
                     onGenerate15Sessions = { viewModel.generateRemaining15Sessions(it) },
                     onStartAttendanceKiosk = { cId, sId ->
                         viewModel.startAttendanceKiosk(cId, sId)

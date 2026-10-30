@@ -519,7 +519,8 @@ class MifareSettingsRepository(context: Context) {
         val normalized = newConfig.copy(
             sectorIndex = newConfig.sectorIndex.coerceIn(0, 39),
             blockIndexInSector = newConfig.blockIndexInSector.coerceIn(0, 14),
-            keyType = primaryCandidate?.keyType ?: newConfig.keyType,
+            // 既定の鍵種別はユーザーの選択を保持する（先頭候補の種別で上書きすると12桁HEXのみの行の試行順が変わってしまう）
+            keyType = newConfig.keyType,
             keyHex = primaryCandidate?.keyHex ?: newConfig.keyHex.trim().uppercase(),
             byteOffset = safeOffset,
             byteLength = safeLength

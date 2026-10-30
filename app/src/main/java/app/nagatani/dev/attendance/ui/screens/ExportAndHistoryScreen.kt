@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.FolderSpecial
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -42,6 +43,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -75,6 +77,7 @@ fun ExportAndHistoryScreen(
 ) {
     var filterCourseId by remember { mutableStateOf<Long?>(null) }
     var searchQuery by remember { mutableStateOf("") }
+    var rowToDelete by remember { mutableStateOf<AttendanceExportRow?>(null) }
 
     val filteredRows = remember(allRows, filterCourseId, searchQuery) {
         allRows.filter { row ->
@@ -321,83 +324,84 @@ fun ExportAndHistoryScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(vertical = 16.dp)
                             )
-                        } else {
-                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                filteredRows.forEach { row ->
-                                    Surface(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        shape = RoundedCornerShape(10.dp),
-                                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-                                    ) {
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(horizontal = 12.dp, vertical = 8.dp),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Row(
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                                ) {
-                                                    Text(
-                                                        text = row.studentId,
-                                                        fontFamily = FontFamily.Monospace,
-                                                        fontWeight = FontWeight.Bold,
-                                                        style = MaterialTheme.typography.bodyLarge
-                                                    )
-                                                    Surface(
-                                                        color = MaterialTheme.colorScheme.primaryContainer,
-                                                        shape = RoundedCornerShape(6.dp)
-                                                    ) {
-                                                        Text(
-                                                            text = "第${row.sessionNumber}回",
-                                                            style = MaterialTheme.typography.labelSmall,
-                                                            fontWeight = FontWeight.Bold,
-                                                            color = MaterialTheme.colorScheme.primary,
-                                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                                        )
-                                                    }
-                                                    Text(
-                                                        text = row.registrationMethod,
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                    )
-                                                }
-                                                Text(
-                                                    text = "${row.courseCode} ${row.courseName}",
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    fontWeight = FontWeight.SemiBold,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
-                                                Text(
-                                                    text = CsvExportManager.formatEpochMillis(row.registeredAt) +
-                                                        if (row.cardUid.isNotBlank()) "  (UID:${row.cardUid})" else "",
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    fontFamily = FontFamily.Monospace,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
-                                            }
-                                            IconButton(
-                                                onClick = { onDeleteRecordById(row.recordId, row.studentId) }
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.DeleteOutline,
-                                                    contentDescription = "削除",
-                                                    tint = MaterialTheme.colorScheme.error
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
                         }
                     }
                 }
+            }
+
+            // 出席データ一覧（件数が多くても画面に表示される行だけを描画する）
+            items(filteredRows, key = { it.recordId }) { row ->
+                        Surface(
+                            modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = row.studentId,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold,
+                                            style = MaterialTheme.typography.bodyLarge
+                                        )
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.primaryContainer,
+                                            shape = RoundedCornerShape(6.dp)
+                                        ) {
+                                            Text(
+                                                text = "第${row.sessionNumber}回",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                        Text(
+                                            text = row.registrationMethod,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Text(
+                                        text = "${row.courseCode} ${row.courseName}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = CsvExportManager.formatEpochMillis(row.registeredAt) +
+                                            if (row.cardUid.isNotBlank()) "  (UID:${row.cardUid})" else "",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { rowToDelete = row }
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.DeleteOutline,
+                                        contentDescription = "削除",
+                                        tint = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                            }
+                        }
             }
         }
     } else {
@@ -709,7 +713,7 @@ fun ExportAndHistoryScreen(
                                             }
                                         }
                                         IconButton(
-                                            onClick = { onDeleteRecordById(row.recordId, row.studentId) }
+                                            onClick = { rowToDelete = row }
                                         ) {
                                             Icon(
                                                 imageVector = Icons.Default.DeleteOutline,
@@ -727,5 +731,34 @@ fun ExportAndHistoryScreen(
             }
         }
     }
+    }
+
+    rowToDelete?.let { target ->
+        AlertDialog(
+            onDismissRequest = { rowToDelete = null },
+            title = { Text("出席記録の削除確認") },
+            text = {
+                Text(
+                    "${target.courseCode} ${target.courseName} 第${target.sessionNumber}回\n" +
+                        "学籍番号 ${target.studentId} の出席記録（${CsvExportManager.formatEpochMillis(target.registeredAt)}）を削除しますか？"
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeleteRecordById(target.recordId, target.studentId)
+                        rowToDelete = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("削除する")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { rowToDelete = null }) {
+                    Text("キャンセル")
+                }
+            }
+        )
     }
 }

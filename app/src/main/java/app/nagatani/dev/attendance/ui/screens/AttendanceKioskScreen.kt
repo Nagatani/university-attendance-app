@@ -258,7 +258,7 @@ fun AttendanceKioskScreen(
                                 )
                                 Spacer(modifier = Modifier.height(if (isCompact) 8.dp else 16.dp))
                                 Text(
-                                    text = "出席を受け付けました",
+                                    text = if (state.isTestOnly) "テスト読取成功（出席は記録されません）" else "出席を受け付けました",
                                     color = Color(0xFFA7F3D0),
                                     fontSize = resultTitleSize,
                                     fontWeight = FontWeight.Bold

@@ -38,11 +38,23 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private const val META_PREFS_NAME = "university_attendance_db_meta"
+        private const val KEY_SAMPLE_DATA_SEEDED = "sample_data_seeded"
+
         /**
-         * 初回起動時に講義マスタが空の場合、すぐにタブレットで動作確認できるようサンプル講義・講義回を作成する
+         * 初回起動時に講義マスタが空の場合、すぐにタブレットで動作確認できるようサンプル講義・講義回を作成する。
+         * ユーザーが講義を全件削除した後に再作成されないよう、判定は一度だけ行う。
          */
-        suspend fun ensureSampleDataIfEmpty(dao: AttendanceDao) {
-            if (dao.getCourseCount() > 0) return
+        suspend fun ensureSampleDataOnFirstLaunch(context: Context, dao: AttendanceDao) {
+            val metaPrefs = context.applicationContext.getSharedPreferences(META_PREFS_NAME, Context.MODE_PRIVATE)
+            if (metaPrefs.getBoolean(KEY_SAMPLE_DATA_SEEDED, false)) return
+            if (dao.getCourseCount() == 0) {
+                insertSampleData(dao)
+            }
+            metaPrefs.edit().putBoolean(KEY_SAMPLE_DATA_SEEDED, true).apply()
+        }
+
+        private suspend fun insertSampleData(dao: AttendanceDao) {
 
             val today = LocalDate.now().toString()
             val courseId1 = dao.insertCourse(

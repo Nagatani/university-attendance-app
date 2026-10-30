@@ -66,6 +66,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.nagatani.dev.attendance.data.local.AttendanceRecordEntity
 import app.nagatani.dev.attendance.data.local.CourseEntity
+import app.nagatani.dev.attendance.data.local.LectureSessionEntity
 import app.nagatani.dev.attendance.data.local.SessionWithCount
 import app.nagatani.dev.attendance.export.CsvExportManager
 import java.time.LocalDate
@@ -84,6 +85,7 @@ fun CourseManagementScreen(
     onCreateCourse: (code: String, name: String, instructor: String, room: String, auto15: Boolean) -> Unit,
     onDeleteCourse: (CourseEntity) -> Unit,
     onCreateSession: (courseId: Long, sessionNumber: Int, title: String, date: String) -> Unit,
+    onDeleteSession: (LectureSessionEntity) -> Unit,
     onGenerate15Sessions: (courseId: Long) -> Unit,
     onStartAttendanceKiosk: (courseId: Long, sessionId: Long) -> Unit,
     onRegisterManualAttendance: (studentId: String, note: String) -> Unit,
@@ -96,6 +98,8 @@ fun CourseManagementScreen(
     var showAddSessionDialog by remember { mutableStateOf(false) }
     var showManualEntryDialog by remember { mutableStateOf(false) }
     var courseToDelete by remember { mutableStateOf<CourseEntity?>(null) }
+    var sessionToDelete by remember { mutableStateOf<SessionWithCount?>(null) }
+    var attendanceToDelete by remember { mutableStateOf<AttendanceRecordEntity?>(null) }
 
     val selectedCourse = courses.find { it.id == selectedCourseId }
     val selectedSessionWithCount = sessions.find { it.session.id == selectedSessionId }
@@ -375,8 +379,16 @@ fun CourseManagementScreen(
                                                 style = MaterialTheme.typography.bodyLarge,
                                                 fontWeight = FontWeight.SemiBold,
                                                 maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f)
                                             )
+                                            IconButton(onClick = { sessionToDelete = selectedSessionWithCount }) {
+                                                Icon(
+                                                    imageVector = Icons.Default.DeleteOutline,
+                                                    contentDescription = "講義回を削除",
+                                                    tint = MaterialTheme.colorScheme.error
+                                                )
+                                            }
                                         }
                                         Text(
                                             text = "実施日: ${currentSession.sessionDate}  |  出席数: ${selectedSessionWithCount.attendanceCount} 名",
@@ -549,7 +561,7 @@ fun CourseManagementScreen(
                                                             )
                                                         }
                                                     }
-                                                    IconButton(onClick = { onDeleteAttendance(record) }) {
+                                                    IconButton(onClick = { attendanceToDelete = record }) {
                                                         Icon(
                                                             imageVector = Icons.Default.DeleteOutline,
                                                             contentDescription = "出席記録を削除",
@@ -873,6 +885,14 @@ fun CourseManagementScreen(
                                     )
                                 }
 
+                                IconButton(onClick = { sessionToDelete = selectedSessionWithCount }) {
+                                    Icon(
+                                        imageVector = Icons.Default.DeleteOutline,
+                                        contentDescription = "講義回を削除",
+                                        tint = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
                                 Button(
                                     onClick = {
                                         onStartAttendanceKiosk(selectedCourse.id, currentSession.id)
@@ -1035,7 +1055,7 @@ fun CourseManagementScreen(
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                     modifier = Modifier.weight(1.4f)
                                                 )
-                                                IconButton(onClick = { onDeleteAttendance(record) }) {
+                                                IconButton(onClick = { attendanceToDelete = record }) {
                                                     Icon(
                                                         imageVector = Icons.Default.DeleteOutline,
                                                         contentDescription = "出席記録を削除",
@@ -1243,6 +1263,61 @@ fun CourseManagementScreen(
             },
             dismissButton = {
                 TextButton(onClick = { courseToDelete = null }) {
+                    Text("キャンセル")
+                }
+            }
+        )
+    }
+
+    sessionToDelete?.let { target ->
+        AlertDialog(
+            onDismissRequest = { sessionToDelete = null },
+            title = { Text("講義回の削除確認") },
+            text = {
+                Text(
+                    "第${target.session.sessionNumber}回「${target.session.sessionTitle}」を削除しますか？\n" +
+                        "この講義回の出席記録（${target.attendanceCount}件）もすべて削除されます。"
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeleteSession(target.session)
+                        sessionToDelete = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("削除する")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { sessionToDelete = null }) {
+                    Text("キャンセル")
+                }
+            }
+        )
+    }
+
+    attendanceToDelete?.let { target ->
+        AlertDialog(
+            onDismissRequest = { attendanceToDelete = null },
+            title = { Text("出席記録の削除確認") },
+            text = {
+                Text("学籍番号 ${target.studentId} の出席記録（${CsvExportManager.formatEpochMillis(target.registeredAt)}）を削除しますか？")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeleteAttendance(target)
+                        attendanceToDelete = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("削除する")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { attendanceToDelete = null }) {
                     Text("キャンセル")
                 }
             }

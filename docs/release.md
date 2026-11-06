@@ -155,10 +155,10 @@ gh secret list -R $REPO   # 4 件が登録されたことを確認
 
 `.github/workflows/release.yml` は `v*` に一致するタグの push で実行され、次の順に処理します。
 
-1. JDK 17 と Gradle をセットアップする
+1. JDK 25 と Gradle をセットアップする
 2. タグ名と `versionName` が一致するか確認する
 3. Secrets からキーストアを一時ディレクトリに復元する。Secrets が 1 つでも欠けていれば停止する（新しい鍵が自動生成されて、更新できない APK ができるのを防ぐため）
-4. `./gradlew :app:testReleaseUnitTest buildReleaseApk` でテストと APK のビルドを行う
+4. `./gradlew :app:testDebugUnitTest buildReleaseApk` でテストと APK のビルドを行う
 5. `gh release create` でリリースを作り、次のファイルを添付する
    - `university-attendance-v<versionName>-b<versionCode>-release.apk`
    - 同じ名前の `.sha256`（SHA-256 チェックサム）
@@ -178,7 +178,7 @@ gh secret list -R $REPO   # 4 件が登録されたことを確認
 | `cleanReleaseDistribution` | `release/` フォルダを削除する |
 
 ```bash
-./gradlew :app:testReleaseUnitTest buildReleaseApk
+./gradlew :app:testDebugUnitTest buildReleaseApk
 ```
 
 `release/` に出力されるファイル:
@@ -197,7 +197,7 @@ R8 によるコード圧縮を有効にする場合は `-PreleaseMinify=true` �
 GitHub Actions を使わずに公開する場合の手順です。
 
 ```bash
-./gradlew :app:testReleaseUnitTest buildReleaseApk
+./gradlew :app:testDebugUnitTest buildReleaseApk
 
 git tag v1.1.0
 git push origin v1.1.0

@@ -44,4 +44,4 @@
 ./gradlew testDebugUnitTest    # 単体テストを実行
 ```
 
-ビルドには JDK 17〜21 が必要です（Android Studio 同梱の JDK を推奨）。詳細は [開発ガイド](docs/development.md) を参照してください。
+ビルドには JDK 17 以上が必要です（JDK 25 を推奨）。詳細は [開発ガイド](docs/development.md) を参照してください。

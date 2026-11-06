@@ -1,0 +1,99 @@
+name: Release APK
+
+# v1.0.0 のようなタグを push すると、署名済みリリースAPKをビルドして GitHub Releases に公開する
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      TAG_NAME: ${{ github.ref_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Verify tag matches versionName
+        run: |
+          VERSION_NAME=$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' app/build.gradle.kts | head -n1)
+          VERSION_CODE=$(sed -n 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*\([0-9]*\).*/\1/p' app/build.gradle.kts | head -n1)
+          if [ -z "$VERSION_NAME" ] || [ -z "$VERSION_CODE" ]; then
+            echo "::error::app/build.gradle.kts から versionName / versionCode を読み取れませんでした"
+            exit 1
+          fi
+          if [ "$TAG_NAME" != "v$VERSION_NAME" ]; then
+            echo "::error::タグ ($TAG_NAME) と versionName (v$VERSION_NAME) が一致しません。app/build.gradle.kts の versionName / versionCode を更新してからタグを付けてください"
+            exit 1
+          fi
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+
+      # Secrets が無いと Gradle が新しいキーストアを自動生成し、既存端末へ上書き更新できないAPKになるため必ず停止する
+      - name: Restore release keystore
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          for name in RELEASE_KEYSTORE_BASE64 RELEASE_STORE_PASSWORD RELEASE_KEY_ALIAS RELEASE_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Secret $name が設定されていません"
+              exit 1
+            fi
+          done
+          KEYSTORE_PATH="$RUNNER_TEMP/release-keystore.jks"
+          echo "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          echo "RELEASE_STORE_FILE=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+
+      - name: Build signed release APK
+        env:
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon :app:testReleaseUnitTest buildReleaseApk
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APK="release/university-attendance-v${VERSION_NAME}-b${VERSION_CODE}-release.apk"
+          test -f "$APK" || { echo "::error::$APK が見つかりません"; exit 1; }
+
+          PRERELEASE_FLAG=""
+          case "$TAG_NAME" in
+            *-*) PRERELEASE_FLAG="--prerelease" ;;  # v1.1.0-beta1 などはプレリリース扱い
+          esac
+
+          gh release create "$TAG_NAME" \
+            "$APK" \
+            "$APK.sha256" \
+            --title "$TAG_NAME" \
+            --generate-notes \
+            --verify-tag \
+            $PRERELEASE_FLAG
+
+      - name: Remove keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release-keystore.jks"

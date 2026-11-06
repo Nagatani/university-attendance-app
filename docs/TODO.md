@@ -94,8 +94,9 @@
 - [ ] 41.【中】テストが7件のロジック単体テストのみ。ViewModel・DAO・マイグレーション・USBポーリングのテストとCIがない
 - [ ] 42.【中】`targetSdk` / `compileSdk` が 34（Google Play 配布時は要件未達）
 - [ ] 43.【低】依存ライブラリが古い（Compose BOM 2024.09、Room 2.6.1、Kotlin 2.0.20 など）
+  - 一部対応: JDK 25 対応のため Gradle 9.8.2 / AGP 9.5.1 / Kotlin 2.4.21 / KSP 2.3.13 / Room 2.8.5 に更新（2026-11-06）。Compose BOM・AndroidX 各種は未更新
 - [ ] 44.【低】`versionCode` が 1 固定
 - [x] 45.【低】ビルドに JDK 21 が必要なことが未記載（JDK 25 では Gradle 8.13 が起動しない）
-  - 対応: `docs/development.md` に JDK 17〜21 が必要なことを記載（2026-11-06）
+  - 対応: Gradle 9.8.2 / AGP 9.5.1 へ更新し、JDK 25 でビルドできるようにした。必要な JDK は `docs/development.md` に記載（2026-11-06）
 - [x] 46.【低】README が最新の変更（PIN保護、`./gradlew`、バックアップ無効化、スキーマ運用）を反映していない
   - 対応: README を簡素化し、`docs/` に利用ガイド・開発ガイド・リリース手順などを整備（2026-11-06）

@@ -13,15 +13,16 @@
 
 | ツール | バージョン |
 | :--- | :--- |
-| JDK | 17〜21（Android Studio 同梱の JBR を推奨） |
-| Android Studio | AGP 8.13 に対応したバージョン（最新の安定版を推奨） |
-| Gradle | 8.13（Gradle Wrapper 同梱） |
-| Android Gradle Plugin | 8.13.2 |
+| JDK | 25（LTS）を推奨。17 以上で動作 |
+| Android Studio | AGP 9.5 に対応したバージョン（最新の安定版を推奨） |
+| Gradle | 9.8.2（Gradle Wrapper 同梱） |
+| Android Gradle Plugin | 9.5.1 |
+| Kotlin | 2.4.21（AGP の組み込み Kotlin サポートを使用） |
 | compileSdk / targetSdk | 34 |
 | minSdk | 26（Android 8.0） |
 
-> JDK 25 では Gradle 8.13 が起動しません。ターミナルからビルドする場合は `JAVA_HOME` を JDK 17〜21 に設定してください。
-> macOS で Android Studio 同梱の JDK を使う例: `export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"`
+> ターミナルからビルドする場合は、`JAVA_HOME` の JDK が使われます。Android Studio では **Settings → Build, Execution, Deployment → Build Tools → Gradle → Gradle JDK** で選んだ JDK が使われます。GitHub Actions のリリースビルドは JDK 25 で行います。
+> JDK 25 でビルドすると `WARNING: A restricted method in java.lang.System has been called` という警告が出ますが、Gradle 自体の警告で、ビルドへの影響はありません。
 
 ## ビルドと実行
 
@@ -61,8 +62,8 @@ ViewModel・DAO・DB マイグレーション・USB ポーリングのテスト�
 
 ## 技術スタック
 
-- Kotlin 2.0 / Jetpack Compose（Material 3）
-- Room（SQLite）、KSP
+- Kotlin 2.4 / Jetpack Compose（Material 3）
+- Room（SQLite）、KSP2
 - Kotlin Coroutines / Flow
 - Android NFC API（`NfcAdapter` ReaderMode、`MifareClassic`）
 - Android USB Host API（`UsbManager`）による USB CCID 通信の独自実装

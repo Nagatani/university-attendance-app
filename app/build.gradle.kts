@@ -7,7 +7,6 @@ import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
 }
@@ -173,10 +172,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     buildFeatures {
         compose = true
     }
@@ -267,7 +262,7 @@ val buildReleaseApk = tasks.create("buildReleaseApk") {
     group = "release"
     description = "署名済みリリースAPKをビルドし、release/ フォルダへバージョン名付きAPKとSHA-256チェックサムを出力します"
     dependsOn(generateReleaseKeystore, "assembleRelease")
-    mustRunAfter("testReleaseUnitTest")
+    mustRunAfter("testDebugUnitTest")
 
     doLast {
         val apkSourceDir = layout.buildDirectory.dir("outputs/apk/release").get().asFile
@@ -345,7 +340,7 @@ val buildReleaseBundle = tasks.create("buildReleaseBundle") {
     group = "release"
     description = "リリース用 Android App Bundle (.aab) をビルドし、release/ フォルダへ出力します"
     dependsOn(generateReleaseKeystore, "bundleRelease")
-    mustRunAfter("testReleaseUnitTest")
+    mustRunAfter("testDebugUnitTest")
 
     doLast {
         val bundleSourceDir = layout.buildDirectory.dir("outputs/bundle/release").get().asFile
@@ -389,8 +384,8 @@ val buildReleaseBundle = tasks.create("buildReleaseBundle") {
  */
 val packageReleaseDistribution = tasks.create("packageReleaseDistribution") {
     group = "release"
-    description = "Releaseユニットテストを実行した上で、署名済みリリースAPKとAABの両方を release/ フォルダへ一括生成します"
-    dependsOn("testReleaseUnitTest", buildReleaseApk, buildReleaseBundle)
+    description = "単体テストを実行した上で、署名済みリリースAPKとAABの両方を release/ フォルダへ一括生成します"
+    dependsOn("testDebugUnitTest", buildReleaseApk, buildReleaseBundle)
 
     doLast {
         println("============================================================")
